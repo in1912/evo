@@ -1,0 +1,18 @@
+services:
+  evolveshot:
+    build: .
+    image: evolveshot:latest
+    container_name: evolveshot
+    restart: unless-stopped
+    ports:
+      - "9666:9666"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - PORT=9666
+      # 首次部署可直接指定远端 ComfyUI（也可登录后到「模型配置 → 模型后端」里改）
+      # - COMFY_MODE=remote
+      # - COMFY_URL=http://192.168.1.100:8189
+      # 远端 TTS 语音引擎（配音）同理，端口 9640：
+      # - MOSS_TTS_MODE=remote
+      # - MOSS_TTS_URL=http://192.168.1.100:9640

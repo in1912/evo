@@ -1,0 +1,22 @@
+# 计算单元与模型在 GPU 机器上，不进主程序镜像（保持构建上下文小）
+ComfyUI/
+py312/
+qwen3-vl-2b/
+cache/
+res/
+work/
+hf_download/
+
+# 运行时数据与日志
+data/
+Logs/
+*.zip
+
+# 开发文件
+.git/
+*.md
+恢复记忆.cmd
+restore-memory.py
+memory/
+start.bat
+start-model.bat

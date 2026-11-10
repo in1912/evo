@@ -1,0 +1,14 @@
+{
+  "name": "evolveshot",
+  "version": "1.0.43",
+  "description": "衍像｜EvolveShot — 图生视频 + 语音克隆配音系统（自包含）",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js"
+  },
+  "dependencies": {
+    "ag-psd": "^34.1.0",
+    "express": "4.22.2",
+    "pngjs": "^7.0.0"
+  }
+}

@@ -1,0 +1,31 @@
+# ========== 重型运行时（Windows 一键包内容，随发布 zip 走、不入库）==========
+ComfyUI/
+python_embeded/
+py312/
+cuda-home/
+Concat-main/
+Concat-main.zip
+
+# ========== 模型与缓存 ==========
+qwen3-vl-2b/
+cache/
+hf_download/
+res/concat/
+res/*.pth
+
+# ========== 运行时数据与日志 ==========
+data/
+Logs/
+*.log
+
+# ========== 发布产物（release/src 源文件入库，zip 不入）==========
+release/*.zip
+*.zip
+
+# ========== 历史/临时 ==========
+evo/
+evo-docker-*.zip
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db

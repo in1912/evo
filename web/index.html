@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>衍像｜EvolveShot</title>
+  <link rel="icon" type="image/svg+xml" href="./favicon.svg?v=1.0.28" />
+  <script>
+    // 主题引导：登录前后都用 localStorage 记忆，白天/夜晚
+    (function () {
+      try {
+        var t = localStorage.getItem('evolveshot_theme') || 'day';
+        document.documentElement.dataset.theme = t;
+      } catch (e) { document.documentElement.dataset.theme = 'day'; }
+    })();
+  </script>
+  <link rel="stylesheet" href="./style.css?v=1.0.28" />
+  <link rel="stylesheet" href="./vendor/material-icons.css" />
+</head>
+<body>
+  <div id="app"></div>
+  <script src="./vendor/vue.global.prod.js"></script>
+  <script src="./app.js?v=1.0.43"></script>
+</body>
+</html>
