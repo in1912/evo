@@ -13,12 +13,20 @@ SKIP_DIRS = {'__pycache__', '.git', '.github', '.ci', '.cache', '.ipynb_checkpoi
 SKIP_EXTS = {'.pyc', '.pyo'}
 WEIGHT_EXTS = {'.safetensors', '.gguf', '.pt', '.pth', '.ckpt', '.bin', '.onnx'}
 
+SKIPPED = []
+
 def add_file(z, full, arc, exec_bit=False):
+    try:
+        with open(full, 'rb') as f:
+            data = f.read()
+    except OSError as e:
+        # 运行中的 ComfyUI/数据库会锁个别文件：跳过并记录，不中断打包
+        SKIPPED.append((arc, str(e)[:60]))
+        return
     zi = zipfile.ZipInfo(arc, date_time=time.localtime(os.path.getmtime(full))[:6])
     zi.compress_type = zipfile.ZIP_DEFLATED
     zi.external_attr = (0o755 if exec_bit else 0o644) << 16
-    with open(full, 'rb') as f:
-        z.writestr(zi, f.read())
+    z.writestr(zi, data)
 
 def add_str(z, arc, content=''):
     zi = zipfile.ZipInfo(arc + '/' if not arc.endswith('/') else arc)
@@ -119,4 +127,8 @@ if __name__ == '__main__':
     if which in ('windows', 'all'): done.append(build_windows())
     if which in ('macos', 'all'): done.append(build_macos())
     if which in ('docker', 'all'): done.append(build_docker())
+    if SKIPPED:
+        print(f'-- 跳过 {len(SKIPPED)} 个不可读文件（多为运行中锁定/缓存）:')
+        for arc, err in SKIPPED[:40]:
+            print('   SKIP', arc, '|', err)
     print('DONE:', ', '.join(done))
