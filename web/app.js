@@ -1548,7 +1548,7 @@
     </div>`,
     data() {
       return {
-        p: { prompt: '', negative: '', variant: 'int8', turbo: '8', aspect_ratio: 'custom', resolution_profile: 'native detail | 0.98 MP', quality_profile: 'recommended | 5 frames', optimize_for_still: true, seed: -1, source_fidelity: 0.6, width: 1024, height: 1024, batch_size: 1, control_after_generate: 'randomize',
+        p: { prompt: '', negative: '', variant: 'int8', turbo: '8', aspect_ratio: 'custom', resolution_profile: 'native detail | 0.98 MP', quality_profile: 'recommended | 5 frames', optimize_for_still: true, seed: -1, source_fidelity: 0.6, width: 1920, height: 1080, batch_size: 1, control_after_generate: 'randomize',
              unet_name: '', ref_unet_name: '', unet_gguf: '', clip_name: '', vae_name: '', similarity_weight: '', top_k: 4 }, // 需求25 模型与高级参数；aspect 默认 custom（宽高框常显可填）
         refs: [],            // [{ name, dataUrl, ext, data }]（data=base64，提交用；文件大不进 params）
         ratioLock: '', ratio: 0, _syncing: false, sizePreset: '', sizePresets: SIZE_PRESETS,
@@ -1701,6 +1701,11 @@
           if (d.negative && !this.p.negative) this.p.negative = d.negative; // 需求23 预置负面词
           for (const k of ['variant', 'turbo', 'aspect_ratio', 'resolution_profile', 'quality_profile', 'source_fidelity', 'batch_size', 'control_after_generate', 'width', 'height', 'unet_name', 'ref_unet_name', 'unet_gguf', 'clip_name', 'vae_name', 'top_k']) if (d[k] !== undefined) this.p[k] = d[k];
           if (d.optimize_for_still !== undefined) this.p.optimize_for_still = !!d.optimize_for_still;
+          // 需求24：默认 1920×1080 → 常用尺寸下拉同步选中 FHD，比例恰好 16:9 时自动锁定（同文生图Z）
+          if (this.p.width && this.p.height) {
+            this.detectLock();
+            this.sizePreset = matchPreset(this.p.width, this.p.height);
+          }
         } catch (e) { /* 后端不可达时保留默认值 */ }
       },
       onRefFiles(e) {
@@ -2163,6 +2168,7 @@
             </div>
           </div>
           <button class="btn primary" :disabled="busy" @click="go">{{ busy ? '生成中' : '开始生成' }}</button>
+          <button class="btn" :disabled="busy || batchBusy" @click="openBatch" title="粘贴多段提示词（每段以「## 图1」标题行分隔），一键批量提交多个视频任务排队执行">批量生成</button>
           <button v-if="busy" class="btn danger" @click="stopJob" title="停止当前任务（排队中的直接出队，执行中的安全打断）">停止</button>
         </div>
       </div>
@@ -2217,6 +2223,29 @@
             </div>
           </div>
           <div style="margin-top:12px;text-align:right"><button class="btn sm" @click="pickOpen = false">取消</button></div>
+        </div>
+      </div>
+
+      <!-- 需求30 批量生成：粘贴「## 图N」分段提示词，一键提交多个生视频H3 任务（对齐文生图Z/文生图H3） -->
+      <div v-if="batchOpen" class="overlay" @click.self="closeBatch">
+        <div class="card" style="max-width:860px;width:94vw;max-height:86vh;overflow:auto">
+          <h3 style="margin:0 0 10px">批量生成（生视频H3）</h3>
+          <div class="muted" style="margin-bottom:8px;font-size:12px">粘贴多段提示词，每段前面加一行以分割关键词开头的标题（默认「## 图1」「## 图2」…）。每段提交为一个独立视频任务，共用当前参数区的尺寸 / 帧数 / 步数等设置；图生视频模式下首帧与尾帧也共用当前已选（含首尾帧模式）。视频生成耗时长，任务按顺序自动排队执行。</div>
+          <div class="row" style="align-items:center;margin-bottom:8px;flex-wrap:wrap">
+            <label style="flex:none;font-size:13px;font-weight:600">分割关键词</label>
+            <input v-model="batchSep" style="width:170px" placeholder="## 图" title="以该关键词开头的行视为一段的标题行" />
+            <span class="muted" style="flex:1;min-width:220px;font-size:12px">以该关键词开头的行 = 新一段的开始；留空用默认「## 图」</span>
+          </div>
+          <textarea v-model="batchText" style="width:100%;min-height:300px;font-size:13px" placeholder="## 图1&#10;镜头一：…&#10;&#10;## 图2&#10;镜头二：…"></textarea>
+          <div v-if="batchText.trim()" class="row" style="align-items:center;margin-top:8px;flex-wrap:wrap">
+            <b style="flex:none">解析出 {{ batchList.length }} 个任务</b>
+            <span v-if="!batchList.length" class="alert err" style="margin:0;flex:1">没识别到分段：每段提示词前需要一行以分割关键词开头的标题行（当前「{{ batchSep || '## 图' }}」）</span>
+            <span v-else class="muted ellip" style="flex:1;font-size:12px" :title="batchList.map(t=>t.title).join(' / ')">{{ batchList.map(t=>t.title).join(' / ') }}</span>
+          </div>
+          <div style="margin-top:12px;text-align:right">
+            <button class="btn sm" :disabled="batchBusy" @click="closeBatch">取消</button>
+            <button class="btn sm primary" style="margin-left:8px" :disabled="batchBusy || !batchList.length" @click="submitBatch">{{ batchBusy ? '提交中 ' + batchDone + '/' + batchList.length + '…' : '一键提交 ' + batchList.length + ' 个任务' }}</button>
+          </div>
         </div>
       </div>
 
@@ -2322,6 +2351,7 @@
         pickOpen: false, pickBusy: false, pickList: [], pickTarget: 'first', // v1.0.43 从系统选图（首帧/尾帧参考图）
         p: { prompt: '', model_name: '', clip_name: '', clip_type: 'minimax', mmproj_name: '(auto)', video_vae: '', audio_vae: '', shot_count: 1, width: 480, height: 832, frames_per_shot: 362, seed: 20260722, steps: 20, seed_per_shot: true, sampler_name: 'euler', scheduler: 'beta', self_anchor_voice: false, output_scale: 1, fps: 24, bit_depth: 'auto', color_space: 'sRGB' },
         h3Status: { running: false, url: '', device: '' },
+        batchOpen: false, batchText: '', batchBusy: false, batchDone: 0, batchSep: '## 图', // 需求30 批量生成（对齐文生图Z/文生图H3）
         busy: false, statusText: '', job: null, timer: null,
         queue: [], qTimer: null, stripPage: 0, stripSize: 10,
         pctHigh: 0, shotSec: '',
@@ -2329,6 +2359,20 @@
     },
     computed: {
       doneVideos() { return (this.queue || []).filter((q) => q.status === 'done' && q.video_path); },
+      // 需求30 批量生成解析（同文生图Z/文生图H3）：以 batchSep 开头的行 = 标题行
+      batchList() {
+        const sep = String(this.batchSep || '').trim() || '## 图';
+        const lines = String(this.batchText || '').split(/\r?\n/);
+        const out = []; let cur = null;
+        for (const ln of lines) {
+          if (ln.trim().startsWith(sep.trim())) {
+            if (cur) out.push(cur);
+            cur = { title: ln.trim().replace(/^#{1,6}\s+/, '').trim() || ('任务' + (out.length + 1)), text: '' };
+          } else if (cur) cur.text += (cur.text ? '\n' : '') + ln;
+        }
+        if (cur) out.push(cur);
+        return out.filter((t) => { t.text = t.text.trim(); return t.text; });
+      },
       stripSlice() { const s = this.stripPage * this.stripSize; return this.doneVideos.slice(s, s + this.stripSize); },
       // 每镜头时长提示（帧数 ÷ 帧率）；秒数框回填帧数见 secToFrames
       framesSecHint() { const f = Number(this.p.fps); return f > 0 ? (this.p.frames_per_shot / f).toFixed(1) + ' 秒' : ''; },
@@ -2412,6 +2456,38 @@
         if (!this.job || !this.job.id) { alert('任务刚提交、还没登记好，1-2 秒后再点停止'); return; }
         try { await api('POST', '/tasks/h3/' + this.job.id + '/stop'); this.statusText = '停止中…'; }
         catch (e) { alert(e.message); }
+      },
+      // 需求30 批量生成：逐段提交（串行 await，共用参数区设置；i2v 模式首帧/尾帧共用当前已选）
+      openBatch() { this.batchOpen = true; },
+      closeBatch() { if (!this.batchBusy) this.batchOpen = false; },
+      async submitBatch() {
+        const list = this.batchList;
+        if (!list.length || this.batchBusy) return;
+        this.batchBusy = true; this.batchDone = 0;
+        const _busy = await busyBefore();
+        let ok = 0; const fails = [];
+        for (const it of list) {
+          try {
+            const body = {
+              prompt: it.text,
+              image: this.mode === 'i2v' ? this.image : undefined, image_ext: this.image_ext,
+              end_image: (this.mode === 'i2v' && this.image2) ? this.image2 : undefined, end_image_ext: this.image2_ext,
+              model_name: this.p.model_name, clip_name: this.p.clip_name, clip_type: this.p.clip_type, mmproj_name: this.p.mmproj_name,
+              video_vae: this.p.video_vae, audio_vae: this.p.audio_vae,
+              shot_count: this.p.shot_count, width: this.p.width, height: this.p.height, frames_per_shot: this.p.frames_per_shot,
+              seed: this.p.seed, steps: this.p.steps, seed_per_shot: this.p.seed_per_shot, sampler_name: this.p.sampler_name, scheduler: this.p.scheduler,
+              self_anchor_voice: this.p.self_anchor_voice, output_scale: this.p.output_scale,
+              fps: this.p.fps, bit_depth: this.p.bit_depth, color_space: this.p.color_space,
+            };
+            await api('POST', '/h3/generate', body);
+            ok++;
+          } catch (e) { fails.push(it.title + '：' + e.message); }
+          this.batchDone++;
+        }
+        this.batchBusy = false;
+        this.refreshQueue(); queueBusyNotice(_busy);
+        if (fails.length) alert('批量提交完成：成功 ' + ok + ' 个，失败 ' + fails.length + ' 个\n' + fails.join('\n'));
+        else { this.batchOpen = false; this.statusText = '批量提交完成（' + ok + ' 个任务已排队）'; }
       },
       fmtDur(ms) {
         if (!ms || ms <= 0) return '-';

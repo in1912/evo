@@ -1206,7 +1206,7 @@ function h3iDefaults() {
     similarity_weight: '',                 // 需求25：帧选优相似度权重（空=自动：t2i 0.6 / refedit 0.35）
     top_k: 4,                              // 需求25：帧选优候选数
     seed: -1,
-    width: 1024, height: 1024,             // v1.0.45 自定义尺寸（aspect_ratio='custom' 时生效，32 的倍数）
+    width: 1920, height: 1080,             // 需求24 默认 FHD（v1.0.45 起自定义尺寸，aspect_ratio='custom' 时生效，32 的倍数自动圆整）
     batch_size: 1, control_after_generate: 'randomize', // v1.0.45 批量与种子策略（randomize/fixed/increment/decrement）
     source_fidelity: 0.6,                  // 参考图编辑：源图保真度
   };
