@@ -1673,6 +1673,7 @@
         try {
           const d = await api('GET', '/image/h3-defaults');
           if (d.prompt && !this.p.prompt) this.p.prompt = d.prompt;
+          if (d.negative && !this.p.negative) this.p.negative = d.negative; // 需求23 预置负面词
           for (const k of ['variant', 'turbo', 'aspect_ratio', 'resolution_profile', 'quality_profile', 'source_fidelity', 'batch_size', 'control_after_generate', 'width', 'height']) if (d[k] !== undefined) this.p[k] = d[k];
           if (d.optimize_for_still !== undefined) this.p.optimize_for_still = !!d.optimize_for_still;
         } catch (e) { /* 后端不可达时保留默认值 */ }
