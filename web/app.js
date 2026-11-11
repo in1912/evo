@@ -1515,7 +1515,7 @@
             <select v-model="p.resolution_profile" :disabled="p.aspect_ratio === 'custom'" :title="p.aspect_ratio === 'custom' ? '自定义尺寸下分辨率档位不参与（宽高直接生效）' : ''"><option v-for="r in resList" :key="r" :value="r">{{ r }}</option></select>
           </div>
           <div class="field"><label>质量档位（潜在帧数：多帧更稳更慢）</label>
-            <select v-model="p.quality_profile"><option v-for="q in qualList" :key="q" :value="q">{{ q }}</option></select>
+            <select v-model="p.quality_profile" title="1 帧档自动配图像 VAE（更锐、最快）；5/9/13/20 帧档采样多帧后帧选优，自动配视频 VAE"><option v-for="q in qualList" :key="q" :value="q">{{ q }}</option></select>
           </div>
           <div class="field"><label>种子（-1 随机）</label><input v-model="p.seed" /></div>
           <div class="field"><label>种子策略</label>
@@ -1561,7 +1561,12 @@
           </div>
           <div class="row">
             <div class="field"><label>文本编码器（CLIP · clip_name）</label><input v-model="p.clip_name" /></div>
-            <div class="field"><label>VAE 模型（vae_name）</label><input v-model="p.vae_name" /></div>
+            <div class="field"><label>VAE 模型（vae_name · 随质量档位联动）</label>
+              <select v-model="p.vae_name" title="质量档位选 1 帧自动配图像 VAE（更锐），多帧档自动配视频 VAE；手动改后切档位会重新联动；后端缺文件时生成会自动回退视频 VAE">
+                <option value="minimax_h3_t1_image_vae_step1597.safetensors">minimax_h3_t1_image_vae_step1597（图像 VAE · 1 帧档专用，更锐）</option>
+                <option value="minimax_h3_video_vae_fp16.safetensors">minimax_h3_video_vae_fp16（视频 VAE · 多帧档）</option>
+              </select>
+            </div>
             <div class="field" style="min-width:180px"><label>帧选优相似度权重（留空=自动：文生图 0.6 / 参考编辑 0.35）</label><input v-model="p.similarity_weight" placeholder="留空=自动" /></div>
             <div class="field" style="max-width:140px"><label>帧选优 top_k</label><input type="number" min="1" max="20" v-model.number="p.top_k" /></div>
           </div>
@@ -1741,6 +1746,10 @@
     },
     beforeUnmount() { if (this.timer) clearInterval(this.timer); if (this.qTimer) clearInterval(this.qTimer); if (this._clock) clearInterval(this._clock); },
     watch: {
+      // 需求31 互锁：质量档位切换 → VAE 跟随（1 帧档=图像 VAE 更锐，多帧档=视频 VAE）；「自动」也切成对应文件（后端有文件缺失兜底）
+      'p.quality_profile': {
+        handler() { this.syncVae(); },
+      },
       // 自定义尺寸锁比联动（同文生图Z：_syncing 防回环，flush sync 保证即时）
       'p.width': { flush: 'sync', handler(v) { if (this._syncing) return; this.sizePreset = ''; if (this.ratioLock && this.ratio && Number(v) > 0) { this._syncing = true; this.p.height = Math.round(Number(v) / this.ratio); this._syncing = false; } } },
       'p.height': { flush: 'sync', handler(v) { if (this._syncing) return; this.sizePreset = ''; if (this.ratioLock && this.ratio && Number(v) > 0) { this._syncing = true; this.p.width = Math.round(Number(v) * this.ratio); this._syncing = false; } } },
@@ -1825,6 +1834,12 @@
         else { this.ratioLock = ''; this.ratio = 0; }
       },
       swapSize() { const w = this.p.width; this._syncing = true; this.p.width = this.p.height; this.p.height = w; this._syncing = false; this.detectLock(); },
+      // 需求31：按质量档位配对 VAE（当前值是「自动」或两件官方 VAE 之一时才联动；手选了别的就不动）
+      syncVae() {
+        const IMG = 'minimax_h3_t1_image_vae_step1597.safetensors', VID = 'minimax_h3_video_vae_fp16.safetensors';
+        const pair = String(this.p.quality_profile || '').includes('1 frame') ? IMG : VID;
+        if (['', IMG, VID].includes(this.p.vae_name) && this.p.vae_name !== pair) this.p.vae_name = pair;
+      },
       async loadDefaults() {
         try {
           const d = await api('GET', '/image/h3-defaults');
@@ -1837,6 +1852,7 @@
             this.detectLock();
             this.sizePreset = matchPreset(this.p.width, this.p.height);
           }
+          this.syncVae(); // 需求31：默认即按质量档位配对 VAE（默认 1 帧档 → 图像 VAE）
         } catch (e) { /* 后端不可达时保留默认值 */ }
       },
       onRefFiles(e) {

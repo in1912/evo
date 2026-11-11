@@ -128,13 +128,14 @@ router.get('/models', async (req, res) => {
   const rows = db.prepare('SELECT * FROM model_configs ORDER BY grp, kind, key').all();
   const backends = {};
   for (const g of ['i2v', 'zimage', 'h3']) backends[g] = { mode: comfy.getMode(g), url: comfy.getUrl(g) };
-  // qil（广告图分层）与 zimage（文生图）共用同一 8189 后端（生成时 baseUrl('zimage')）。
-  // 不把它算作独立后端，避免 /models 遍历到 grp='qil' 的行时 backends[g] 为 undefined 而崩。
-  backends.qil = { mode: comfy.getMode('zimage'), url: comfy.getUrl('zimage') };
+  // qil（广告图分层）与 h3i（文生图H3）都走 baseUrl('zimage') 统一后端（生成时共用同一 8189）。
+  // 不把它们算作独立后端，避免 /models 遍历到 grp='qil'/'h3i' 的行时 backends[g] 为 undefined 而崩
+  //（h3i 组 v1.0.44 就进了 model_configs，此前 /api/models 一打就 TypeError 崩进程——v1.0.54 根修）。
+  for (const alias of ['qil', 'h3i']) backends[alias] = { mode: comfy.getMode('zimage'), url: comfy.getUrl('zimage') };
 
   // 存在性一律问「实际执行生成的那台 ComfyUI」：本地模式 = baseUrl()（统一后端 8189），
   // 远端模式 = 配置的 URL。物理扫盘已不可靠（模型经 extra_model_paths 挂载，不在本目录）。
-  const baseOf = (g) => comfy.baseUrl(g === 'qil' ? 'zimage' : g).replace(/\/+$/, '');
+  const baseOf = (g) => comfy.baseUrl((g === 'qil' || g === 'h3i') ? 'zimage' : g).replace(/\/+$/, '');
   const listCache = new Map(); // 'base|kind' → string[] | null
   const wanted = new Set();
   for (const r of rows) wanted.add(baseOf(r.grp || 'i2v') + '|' + r.kind);
@@ -311,6 +312,7 @@ const MODEL_SOURCES = {
   'MiniMax-H3-fl2va-curve-Q4_0.gguf': 'hf:joeygambino/MiniMax-H3-curve-GGUF/fl2va/MiniMax-H3-fl2va-curve-Q4_0.gguf',
   'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors': 'hf:Comfy-Org/MiniMax-H3/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors',
   'minimax_h3_video_vae_fp16.safetensors': 'hf:Comfy-Org/MiniMax-H3/vae/minimax_h3_video_vae_fp16.safetensors',
+  'minimax_h3_t1_image_vae_step1597.safetensors': 'hf:Mamad8/MiniMax-H3-Image-VAE/minimax_h3_t1_image_vae_step1597.safetensors', // 需求31 图像 VAE（2026-11-11 HEAD 200 实证 5207808784B）
   'minimax_h3_audio_vae_fp32.safetensors': 'hf:Comfy-Org/MiniMax-H3/vae/minimax_h3_audio_vae_fp32.safetensors',
 };
 function effectiveSource(row) {

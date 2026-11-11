@@ -330,6 +330,7 @@ const DEFAULT_MODELS = [
   { key: 'h3i_model_ph3', name: 'P-H3-Image w4a8 小显存（预留切换位）', kind: 'diffusion_model', path: 'p-h3-image_w4a8.safetensors', grp: 'h3i' },
   { key: 'h3i_clip', name: 'H3-Image 文本编码器（qwen3vl，与视频生成共用）', kind: 'text_encoder', path: 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors', grp: 'h3i' },
   { key: 'h3i_vae', name: 'H3-Image VAE（H3 视频VAE，与视频生成共用）', kind: 'vae', path: 'minimax_h3_video_vae_fp16.safetensors', grp: 'h3i' },
+  { key: 'h3i_image_vae', name: 'H3-Image 图像 VAE（1帧档专用，更锐·5.2GB）', kind: 'vae', path: 'minimax_h3_t1_image_vae_step1597.safetensors', grp: 'h3i' },
   { key: 'h3i_lora8', name: 'H3-Image Turbo LoRA 8步', kind: 'lora', path: 'minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors', grp: 'h3i' },
   { key: 'h3i_lora4', name: 'H3-Image Turbo LoRA 4步', kind: 'lora', path: 'minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors', grp: 'h3i' },
   // Qwen-Image-Layered（广告图/PSD 分层图）：独立三件套，节点为 8189(0.34) 内置核心节点，无需装
@@ -1218,6 +1219,20 @@ async function generateImage({ prompt, negativePrompt, clipName, clipType, clipD
 // 原理：H3 FL2VA 权重采样 1 帧潜在画面 + 视频 VAE 解码（Fizgig 手法）。
 // 变体：int8_convrot（默认） / gguf（预留） / ph3-w4a8（PrunaAI 小显存，预留——需 PH3ImageConditioning 节点包）
 const H3I_REQUIRED_VERSION = '0.37.0'; // Image Studio 节点包声明的最低核心版本
+// 需求31（v1.0.53）：1 帧档自动配图像 VAE——节点作者指定的 minimax_h3_t1_image_vae_step1597（Mamad8/MiniMax-H3-Image-VAE，fp32 5.2GB）
+// 前端质量档位↔VAE 互锁（选 1 帧=此件，选多帧=视频 VAE）；此处为接口层兜底配对。多帧档仍用视频 VAE（作者明确：image VAE 只解 1 帧）
+const H3I_VIDEO_VAE = 'minimax_h3_video_vae_fp16.safetensors';
+const H3I_IMAGE_VAE = 'minimax_h3_t1_image_vae_step1597.safetensors';
+let _vaeListCache = { ts: 0, list: null };
+async function listVaeModels(base) { // 枚举执行后端 models/vae（60s 缓存；失败返回 null → 走视频 VAE 兜底）
+  if (_vaeListCache.list && Date.now() - _vaeListCache.ts < 60000) return _vaeListCache.list;
+  try {
+    const r = await fetch(base + '/models/vae', { signal: AbortSignal.timeout(8000) });
+    const j = await r.json();
+    if (Array.isArray(j)) { _vaeListCache = { ts: Date.now(), list: j }; return j; }
+  } catch { /* 探测失败不拦截 */ }
+  return null;
+}
 
 function h3iDefaults() {
   return {
@@ -1240,10 +1255,10 @@ function h3iDefaults() {
     ref_unet_name: 'minimax_h3_ref2va_pruned_int8_convrot.safetensors',
     unet_gguf: 'MiniMax-H3-fl2va-curve-Q4_0.gguf',
     clip_name: 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors', clip_type: 'minimax',
-    vae_name: 'minimax_h3_video_vae_fp16.safetensors',
+    vae_name: '',                          // 需求31：空=自动（1帧档→图像VAE更锐，多帧档→视频VAE；后端无图像VAE文件时回退视频）
     aspect_ratio: 'custom',                // v1.0.47 需求26：默认自定义尺寸（宽高框常显可填；预设档仍可选）
     resolution_profile: 'native detail | 0.98 MP',
-    quality_profile: 'single image | 1 frame (image VAE)',   // 需求27：默认 1 帧最快档（节点注：video VAE 解码可用、稍软；专用 image VAE 文件未配）
+    quality_profile: 'single image | 1 frame (image VAE)',   // 需求27：默认 1 帧最快档；需求31：该档自动配图像 VAE（更锐）
     optimize_for_still: true,
     turbo: '8',                            // '8' | '4' | 'off'（t2i 用 Turbo LoRA；参考图编辑固定 base 20 步）
     similarity_weight: '',                 // 需求25：帧选优相似度权重（空=自动：t2i 0.6 / refedit 0.35）
@@ -1287,7 +1302,7 @@ function buildH3ImageWorkflow(p) {
 
   const wf = {
     '2': { class_type: 'CLIPLoader', inputs: { clip_name: p.clipName || models.h3i_clip || 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors', type: 'minimax', device: 'default' } },
-    '3': { class_type: 'VAELoader', inputs: { vae_name: p.vaeName || models.h3i_vae || 'minimax_h3_video_vae_fp16.safetensors' } },
+    '3': { class_type: 'VAELoader', inputs: { vae_name: p.vaeName || models.h3i_vae || H3I_VIDEO_VAE } }, // 需求31：vaeName 由 generateH3Image 按档位自动配对后传入
   };
   // 主模型装载：int8_convrot/ref2va 走 UNETLoader；GGUF 走 UnetLoaderGGUF（两个加载器输出同为 MODEL，可互换）
   if (variant === 'gguf') wf['1'] = { class_type: 'UnetLoaderGGUF', inputs: { unet_name: unet } };
@@ -1386,7 +1401,26 @@ async function generateH3Image({ prompt, mode, variant, turbo, aspectRatio, reso
   }
 
   prog('组装工作流…', 12);
-  const wf = buildH3ImageWorkflow({ mode: m, variant, turbo, prompt, aspectRatio, resolutionProfile, qualityProfile, optimizeForStill, seed, sourceFidelity, width, height, unetName, refUnetName, unetGgufName, clipName, vaeName, similarityWeight, topK, refNames, prefix: `h3i_${jobId}`, models: modelMap('h3i') });
+  // 需求31：VAE 自动配对——未手动指定时，1 帧档且执行后端配了图像 VAE 文件 → 图像 VAE（更锐）；多帧档/未配文件 → 视频 VAE
+  const h3iModels = modelMap('h3i');
+  let vaeSel = vaeName;
+  if (!vaeSel) {
+    const singleFrame = String(qualityProfile || h3iDefaults().quality_profile).includes('1 frame');
+    const imgVae = h3iModels.h3i_image_vae || H3I_IMAGE_VAE;
+    if (singleFrame && (await listVaeModels(base) || []).includes(imgVae)) {
+      vaeSel = imgVae;
+      prog('质量档位 1 帧 → 使用图像 VAE（' + imgVae + '）', 12);
+    }
+  }
+  // 需求31 兜底：显式指定的 VAE 文件在执行后端不存在（如三端包环境未下载 5.2GB 图像 VAE）→ 回退视频 VAE，不让任务死在装载器
+  if (vaeSel) {
+    const have = await listVaeModels(base);
+    if (have && !have.includes(vaeSel) && have.includes(H3I_VIDEO_VAE)) {
+      prog('VAE「' + vaeSel + '」后端未配置，回退视频 VAE', 12);
+      vaeSel = '';
+    }
+  }
+  const wf = buildH3ImageWorkflow({ mode: m, variant, turbo, prompt, aspectRatio, resolutionProfile, qualityProfile, optimizeForStill, seed, sourceFidelity, width, height, unetName, refUnetName, unetGgufName, clipName, vaeName: vaeSel, similarityWeight, topK, refNames, prefix: `h3i_${jobId}`, models: h3iModels });
 
   prog('提交 ComfyUI…', 22);
   const mon = progressMonitor(base);
@@ -1713,4 +1747,4 @@ async function adoptRun({ base, promptId, kind, jobId, extract, deadlineMin = 13
 // 从任意 base（含本机 local 模式的 8189）经 HTTP /view 下载产物——收养路径统一走 HTTP，避免依赖当前模式
 async function downloadOutput(out, dst, base) { await fetchOutputTo(out, dst, base, null); }
 
-module.exports = { ensureComfy, ensureZimage, fetchHistory, freeIfKindSwitch, fetchViewWithRetry, fetchOutputTo, generate, generateImage, generateH3Video, buildH3Workflow, ensureH3, zimageDefaults, h3Defaults, qilDefaults, generateQilImage, buildQilWorkflow, assemblePsd, extractImages, status, statusFor, modelMap, DEFAULT_MODELS, DEFAULT_NEGATIVE, seedModels, listLoras, runHighResFix, getMode, getUrl, baseUrl, setBackend, outputDir, lanIp, getListenAddr, configureComputeNode, UPLOAD_DIR, COMFY_DIR, PYTHON, FFMPEG_DIR, WORKFLOW_FLF, WORKFLOW_ZIMAGE, activeRuns, adoptRun, downloadOutput, syncModelPaths, selfHealBackend, generateH3Image, h3iDefaults, buildH3ImageWorkflow, H3I_REQUIRED_VERSION };
+module.exports = { ensureComfy, ensureZimage, fetchHistory, freeIfKindSwitch, fetchViewWithRetry, fetchOutputTo, generate, generateImage, generateH3Video, buildH3Workflow, ensureH3, zimageDefaults, h3Defaults, qilDefaults, generateQilImage, buildQilWorkflow, assemblePsd, extractImages, status, statusFor, modelMap, DEFAULT_MODELS, DEFAULT_NEGATIVE, seedModels, listLoras, runHighResFix, getMode, getUrl, baseUrl, setBackend, outputDir, lanIp, getListenAddr, configureComputeNode, UPLOAD_DIR, COMFY_DIR, PYTHON, FFMPEG_DIR, WORKFLOW_FLF, WORKFLOW_ZIMAGE, activeRuns, adoptRun, downloadOutput, syncModelPaths, selfHealBackend, generateH3Image, h3iDefaults, buildH3ImageWorkflow, H3I_REQUIRED_VERSION, listVaeModels, __resetVaeCacheForTest: () => { _vaeListCache = { ts: 0, list: null }; } };
