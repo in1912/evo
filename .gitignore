@@ -29,3 +29,9 @@ __pycache__/
 *.pyc
 .DS_Store
 Thumbs.db
+
+# 换核遗留（0.34 备份与 0.45 试验树、冒烟素材）
+ComfyUI-034-bak/
+ComfyUI-045/
+work/upgrade-045/
+*.fp16bak

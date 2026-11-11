@@ -18,13 +18,13 @@ async function runJobSync(jobId, opts) {
   const startedAt = Date.now();
   set("UPDATE img_jobs SET status='running' WHERE id=?", jobId);
   try {
-    // layered=true → Qwen-Image-Layered 广告图（产出 PSD 分层文件）；否则 Z-image 文生图
-    const gen = opts.layered ? comfy.generateQilImage : comfy.generateImage;
+    // layered=true → Qwen-Image-Layered 广告图；source='h3' → 文生图H3；否则 Z-image 文生图
+    const gen = opts.layered ? comfy.generateQilImage : (opts.source === 'h3' ? comfy.generateH3Image : comfy.generateImage);
     const r = await gen(opts, (text, pct) => {
       const p = Math.max(0, Math.min(100, Number(pct) || 0));
       set('UPDATE img_jobs SET progress=?, progress_pct=? WHERE id=?', String(text || '').slice(0, 300), p, jobId);
     }, {
-      kind: opts.layered ? 'qil' : 'zimage', jobId,
+      kind: opts.layered ? 'qil' : (opts.source === 'h3' ? 'h3i' : 'zimage'), jobId,
       // v1.0.14 第14条：工作流在提交成功那一刻就落库（此前只在 done 时写——运行中/失败的任务下载是 '{}'）
       onSubmitted: (pid, base, wf) => set('UPDATE img_jobs SET prompt_id=?, comfy_base=?, workflow=? WHERE id=?', pid, base, wf ? JSON.stringify(wf) : '', jobId),
     });
@@ -78,7 +78,7 @@ async function resume(row) {
       }
     } catch { /* 解析失败按普通文生图收养 */ }
     const { out, hist } = await comfy.adoptRun({
-      base: row.comfy_base, promptId: row.prompt_id, kind: qil ? 'qil' : 'zimage', jobId: row.id, extract: qil ? 'raw' : 'image', deadlineMin: 30,
+      base: row.comfy_base, promptId: row.prompt_id, kind: qil ? 'qil' : (row.source === 'h3' ? 'h3i' : 'zimage'), jobId: row.id, extract: qil ? 'raw' : 'image', deadlineMin: 30,
       prog: (t, pct) => set('UPDATE img_jobs SET progress=?, progress_pct=COALESCE(?, progress_pct) WHERE id=?', String(t || '').slice(0, 300), Number.isFinite(pct) ? Math.max(0, Math.min(100, pct)) : null, row.id),
     });
     const wf = (hist && hist[row.prompt_id] && hist[row.prompt_id].prompt) || {};
@@ -116,6 +116,8 @@ router.post('/image/generate', (req, res) => {
     prompt, negative_prompt, clip_name, clip_type, clip_device, vae_name, unet_name, weight_dtype,
     width, height, batch_size, shift, seed, steps, cfg, sampler_name, scheduler, denoise,
     layered, layers, source, gen_mode, upscale_method, image,
+    // v1.0.44 文生图H3（source='h3'）：变体/采样/预设 + 参考图数组（第一张=源图，其余=参考图2..9）
+    variant, turbo, aspect_ratio, resolution_profile, quality_profile, optimize_for_still, source_fidelity, images,
   } = req.body || {};
 
   if (req.user.quota >= 0) {
@@ -125,10 +127,11 @@ router.post('/image/generate', (req, res) => {
   // v1.0.36 生成模式：t2i=文生图 / hires=重绘放大(img2img) / upscale=纯超分(RealESRGAN，不重绘)
   const genMode = ['hires', 'upscale'].includes(gen_mode) ? gen_mode : 't2i';
   if (genMode !== 'upscale' && !String(prompt || '').trim()) return res.status(400).json({ error: '正向提示词不能为空' });
+  const src = source === 'ad' ? 'ad' : (source === 'h3' ? 'h3' : 'zimage'); // 任务来源：广告图/文生图/文生图H3 各自只看自己的队列
 
   // 放大模式：原图落盘（generateRoutes.saveImage 同款 dataURL 解析）
   let srcImagePath = '';
-  if (genMode !== 't2i') {
+  if (src === 'zimage' && genMode !== 't2i') {
     const b64 = String((image && image.data) || '').replace(/^data:image\/\w+;base64,/, '');
     const buf = Buffer.from(b64, 'base64');
     if (buf.length < 64) return res.status(400).json({ error: '放大模式：请先上传原图' });
@@ -138,12 +141,33 @@ router.post('/image/generate', (req, res) => {
   }
   const upMethod = ['nearest-exact', 'bicubic', 'bilinear'].includes(upscale_method) ? upscale_method : 'nearest-exact';
 
-  const src = source === 'ad' ? 'ad' : 'zimage'; // 任务来源：广告图/文生图各自只看自己的队列
-  const params = { clip_name, clip_type, clip_device, vae_name, unet_name, weight_dtype, width, height, batch_size, shift, seed, steps, cfg, sampler_name, scheduler, denoise, layered: !!layered, layers: Math.max(2, Math.min(8, Math.floor(Number(layers) || 3))), gen_mode: genMode, upscale_method: upMethod };
+  // 文生图H3：参考图数组落盘（有图=参考图编辑 refedit，无图=纯文生图 t2i；服务端按图定模式，与前端展示一致）
+  let h3RefPaths = [];
+  if (src === 'h3' && Array.isArray(images)) {
+    for (const im of images.slice(0, 9)) {
+      const b64 = String((im && im.data) || '').replace(/^data:image\/\w+;base64,/, '');
+      const buf = Buffer.from(b64, 'base64');
+      if (buf.length < 64) continue;
+      const e2 = (String((im && im.ext) || '').replace('.', '').toLowerCase() || 'png').replace(/[^a-z0-9]/g, '') || 'png';
+      const f = path.join(comfy.UPLOAD_DIR, `h3i_src_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.${e2}`);
+      fs.writeFileSync(f, buf);
+      h3RefPaths.push(f);
+    }
+  }
+
+  let params, opts;
+  if (src === 'h3') {
+    const h3Mode = h3RefPaths.length ? 'refedit' : 't2i';
+    params = { mode: h3Mode, variant: variant === 'gguf' || variant === 'ph3' ? variant : 'int8', turbo: ['4', '8', 'off'].includes(turbo) ? turbo : '8', aspect_ratio, resolution_profile, quality_profile, optimize_for_still: !!optimize_for_still, source_fidelity: Number(source_fidelity) || 0.6, seed, gen_mode: 't2i' };
+    opts = { prompt, mode: h3Mode, variant: params.variant, turbo: params.turbo, aspectRatio: aspect_ratio, resolutionProfile: resolution_profile, qualityProfile: quality_profile, optimizeForStill: !!optimize_for_still, sourceFidelity: Number(source_fidelity) || 0.6, seed, refImages: h3RefPaths, source: 'h3' };
+  } else {
+    params = { clip_name, clip_type, clip_device, vae_name, unet_name, weight_dtype, width, height, batch_size, shift, seed, steps, cfg, sampler_name, scheduler, denoise, layered: !!layered, layers: Math.max(2, Math.min(8, Math.floor(Number(layers) || 3))), gen_mode: genMode, upscale_method: upMethod };
+    opts = { prompt, negativePrompt: negative_prompt, clipName: clip_name, clipType: clip_type, clipDevice: clip_device, vaeName: vae_name, unetName: unet_name, weightDtype: weight_dtype, width, height, batchSize: batch_size, shift, seed, steps, cfg, samplerName: sampler_name, scheduler, denoise, layered: !!layered, layers: Math.max(2, Math.min(8, Math.floor(Number(layers) || 3))), genMode, srcImagePath, upscaleMethod: upMethod, source: src };
+  }
   const info = db.prepare('INSERT INTO img_jobs(user_id, prompt, negative_prompt, params, status, source) VALUES(?,?,?,?,?,?)')
     .run(req.user.id, String(prompt || '').trim() || (genMode === 'upscale' ? '[纯超分放大]' : ''), String(negative_prompt || ''), JSON.stringify(params), 'pending', src);
   const jobId = Number(info.lastInsertRowid);
-  enqueue(jobId, { prompt, negativePrompt: negative_prompt, clipName: clip_name, clipType: clip_type, clipDevice: clip_device, vaeName: vae_name, unetName: unet_name, weightDtype: weight_dtype, width, height, batchSize: batch_size, shift, seed, steps, cfg, samplerName: sampler_name, scheduler, denoise, layered: !!layered, layers: Math.max(2, Math.min(8, Math.floor(Number(layers) || 3))), genMode, srcImagePath, upscaleMethod: upMethod });
+  enqueue(jobId, opts);
   res.json({ ok: true, id: jobId });
 });
 
@@ -162,7 +186,7 @@ router.get('/image/queue', (req, res) => {
   const conds = [];
   const args = [];
   if (req.user.role !== 'admin') { conds.push('user_id=?'); args.push(req.user.id); }
-  if (req.query.source === 'ad' || req.query.source === 'zimage') { conds.push('source=?'); args.push(req.query.source); }
+  if (req.query.source === 'ad' || req.query.source === 'zimage' || req.query.source === 'h3') { conds.push('source=?'); args.push(req.query.source); }
   const where = conds.length ? ' WHERE ' + conds.join(' AND ') : '';
   const rows = db.prepare(`SELECT ${cols} FROM img_jobs${where} ORDER BY id DESC LIMIT 60`).all(...args);
   res.json({ jobs: rows });
@@ -176,6 +200,11 @@ router.get('/image/defaults', (req, res) => {
 // 广告图（Qwen-Image-Layered）默认参数（提示词内置 PSD 分层引导）
 router.get('/image/qil-defaults', (req, res) => {
   res.json(comfy.qilDefaults());
+});
+
+// v1.0.44 文生图H3（MiniMax-H3-Image）默认参数
+router.get('/image/h3-defaults', (req, res) => {
+  res.json(comfy.h3iDefaults());
 });
 
 // 输出静态图

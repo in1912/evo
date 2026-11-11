@@ -26,7 +26,7 @@
     },
     "155": {
         "inputs": {
-            "enable_fp16_accumulation": true,
+            "enable_fp16_accumulation": false,
             "model": [
                 "154",
                 0
@@ -52,7 +52,7 @@
     },
     "160": {
         "inputs": {
-            "enable_fp16_accumulation": true,
+            "enable_fp16_accumulation": false,
             "model": [
                 "159",
                 0

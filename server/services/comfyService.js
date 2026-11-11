@@ -292,6 +292,16 @@ const DEFAULT_MODELS = [
   { key: 'h3_clip', name: 'H3 文本编码器', kind: 'text_encoder', path: 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors', grp: 'h3' },
   { key: 'h3_video_vae', name: 'H3 视频 VAE', kind: 'vae', path: 'minimax_h3_video_vae_fp16.safetensors', grp: 'h3' },
   { key: 'h3_audio_vae', name: 'H3 音频 VAE', kind: 'vae', path: 'minimax_h3_audio_vae_fp32.safetensors', grp: 'h3' },
+  // v1.0.44 文生图H3（MiniMax-H3-Image / Image Studio 自定义节点，需 ComfyUI ≥0.37）
+  // int8_convrot 为默认主模型；GGUF / P-H3 w4a8 为预留切换位（模型页存在性校验照常生效）
+  { key: 'h3i_model', name: 'H3-Image 主模型 int8_convrot', kind: 'diffusion_model', path: 'minimax_h3_fl2va_pruned_int8_convrot.safetensors', grp: 'h3i' },
+  { key: 'h3i_ref_model', name: 'H3-Image 参考图模型 ref2va int8', kind: 'diffusion_model', path: 'minimax_h3_ref2va_pruned_int8_convrot.safetensors', grp: 'h3i' },
+  { key: 'h3i_model_gguf', name: 'H3-Image 主模型 GGUF（预留切换位）', kind: 'diffusion_model', path: 'MiniMax-H3-fl2va-curve-Q4_0.gguf', grp: 'h3i' },
+  { key: 'h3i_model_ph3', name: 'P-H3-Image w4a8 小显存（预留切换位）', kind: 'diffusion_model', path: 'p-h3-image_w4a8.safetensors', grp: 'h3i' },
+  { key: 'h3i_clip', name: 'H3-Image 文本编码器（qwen3vl，与视频生成共用）', kind: 'text_encoder', path: 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors', grp: 'h3i' },
+  { key: 'h3i_vae', name: 'H3-Image VAE（H3 视频VAE，与视频生成共用）', kind: 'vae', path: 'minimax_h3_video_vae_fp16.safetensors', grp: 'h3i' },
+  { key: 'h3i_lora8', name: 'H3-Image Turbo LoRA 8步', kind: 'lora', path: 'minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors', grp: 'h3i' },
+  { key: 'h3i_lora4', name: 'H3-Image Turbo LoRA 4步', kind: 'lora', path: 'minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors', grp: 'h3i' },
   // Qwen-Image-Layered（广告图/PSD 分层图）：独立三件套，节点为 8189(0.34) 内置核心节点，无需装
   { key: 'qil_unet', name: 'QIL 扩散模型（Qwen-Image-Layered）', kind: 'diffusion_model', path: 'qwen_image_layered_fp8mixed.safetensors', grp: 'qil' },
   { key: 'qil_clip', name: 'QIL 文本编码器（Qwen2.5-VL）', kind: 'text_encoder', path: 'qwen_2.5_vl_7b_fp8_scaled.safetensors', grp: 'qil' },
@@ -1127,6 +1137,197 @@ async function generateImage({ prompt, negativePrompt, clipName, clipType, clipD
   return { imagePath: dstImage, promptId, status: lastStatus, workflow: wf };
 }
 
+// ---------- 文生图H3（MiniMax-H3-Image，Image Studio 自定义节点，需 ComfyUI ≥0.37） ----------
+// 原理：H3 FL2VA 权重采样 1 帧潜在画面 + 视频 VAE 解码（Fizgig 手法）。
+// 变体：int8_convrot（默认） / gguf（预留） / ph3-w4a8（PrunaAI 小显存，预留——需 PH3ImageConditioning 节点包）
+const H3I_REQUIRED_VERSION = '0.37.0'; // Image Studio 节点包声明的最低核心版本
+
+function h3iDefaults() {
+  return {
+    prompt: '一只橘色虎斑猫坐在窗台上晒太阳，窗外是虚化的城市街景，午后侧光，毛发细节丰富，摄影质感。',
+    variant: 'int8',                       // int8 | gguf | ph3（后两者为预留切换位）
+    mode: 't2i',                           // t2i | refedit（参考图编辑，走 ref2va 模型）
+    unet_name: 'minimax_h3_fl2va_pruned_int8_convrot.safetensors',
+    ref_unet_name: 'minimax_h3_ref2va_pruned_int8_convrot.safetensors',
+    unet_gguf: 'MiniMax-H3-fl2va-curve-Q4_0.gguf',
+    clip_name: 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors', clip_type: 'minimax',
+    vae_name: 'minimax_h3_video_vae_fp16.safetensors',
+    aspect_ratio: '1:1 square',
+    resolution_profile: 'native detail | 0.98 MP',
+    quality_profile: 'recommended | 5 frames',
+    optimize_for_still: true,
+    turbo: '8',                            // '8' | '4' | 'off'（t2i 用 Turbo LoRA；参考图编辑固定 base 20 步）
+    seed: -1,
+    source_fidelity: 0.6,                  // 参考图编辑：源图保真度
+  };
+}
+
+// 采样预设 → [sampling_profile, 配套 LoRA 文件名]。LoRA 与采样配方不可互换（作者明确警告），按官方配对写死。
+const H3I_SAMPLING = {
+  t2i: {
+    '8': ['FL2VA Turbo v1.0 768p | 8 steps', 'minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors'],
+    '4': ['FL2VA Turbo v1.2 768p | 4 steps', 'minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors'],
+    off: ['base quality | RES 20 steps', ''],
+  },
+  refedit: { off: ['base quality | RES 20 steps', ''] }, // ref2v turbo LoRA 未配，参考图编辑固定 base
+};
+
+// 组装 H3-Image 工作流（API 格式）；refedit 时 refNames[0]=源图、refNames[1..8]=参考图2..9
+function buildH3ImageWorkflow(p) {
+  const models = p.models || {};
+  const mode = p.mode === 'refedit' ? 'refedit' : 't2i';
+  const variant = p.variant === 'gguf' ? 'gguf' : p.variant === 'ph3' ? 'ph3' : 'int8';
+  if (variant === 'ph3') throw new Error('P-H3-Image（w4a8 小显存）为预留切换位：等待 PrunaAI 节点包（PH3ImageConditioning）就绪后开放');
+  if (mode === 'refedit' && variant === 'gguf') throw new Error('参考图编辑暂只支持 int8_convrot（GGUF 为文生图预留位）');
+  const turbo = mode === 'refedit' ? 'off' : (p.turbo === '4' ? '4' : p.turbo === 'off' ? 'off' : '8');
+  const [profile, lora] = H3I_SAMPLING[mode][turbo] || H3I_SAMPLING[mode].off;
+  const unet = mode === 'refedit'
+    ? (p.refUnet || models.h3i_ref_model || 'minimax_h3_ref2va_pruned_int8_convrot.safetensors')
+    : (variant === 'gguf' ? (p.unetGguf || models.h3i_model_gguf || 'MiniMax-H3-fl2va-curve-Q4_0.gguf')
+                          : (p.unet || models.h3i_model || 'minimax_h3_fl2va_pruned_int8_convrot.safetensors'));
+  const refs = (p.refNames || []).slice(0, 9);
+
+  const wf = {
+    '2': { class_type: 'CLIPLoader', inputs: { clip_name: p.clipName || models.h3i_clip || 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors', type: 'minimax', device: 'default' } },
+    '3': { class_type: 'VAELoader', inputs: { vae_name: p.vaeName || models.h3i_vae || 'minimax_h3_video_vae_fp16.safetensors' } },
+  };
+  // 主模型装载：int8_convrot/ref2va 走 UNETLoader；GGUF 走 UnetLoaderGGUF（两个加载器输出同为 MODEL，可互换）
+  if (variant === 'gguf') wf['1'] = { class_type: 'UnetLoaderGGUF', inputs: { unet_name: unet } };
+  else wf['1'] = { class_type: 'UNETLoader', inputs: { unet_name: unet, weight_dtype: 'default' } };
+
+  // 分辨率预设：参考图编辑选「source image」时按源图比例
+  const res = { class_type: 'H3ImageResolutionPreset', inputs: { aspect_ratio: p.aspectRatio || '1:1 square', resolution_profile: p.resolutionProfile || 'native detail | 0.98 MP' } };
+  if (mode === 'refedit' && refs.length && res.inputs.aspect_ratio === 'source image') res.inputs.source_image = ['0', 0];
+  wf['4'] = res;
+
+  if (mode === 'refedit') {
+    wf['0'] = { class_type: 'LoadImage', inputs: { image: refs[0] } };
+    refs.slice(1).forEach((name, i) => { wf[String(20 + i)] = { class_type: 'LoadImage', inputs: { image: name } }; });
+    const prep = {
+      class_type: 'H3ReferenceEditPrepare',
+      inputs: {
+        clip: ['2', 0], vae: ['3', 0], source_image: ['0', 0],
+        edit_instruction: String(p.prompt || '').trim(),
+        width: ['4', 0], height: ['4', 1],
+        quality_profile: p.qualityProfile || 'recommended | 5 frames',
+        source_fidelity: Math.max(0, Math.min(1, Number(p.sourceFidelity) || 0.6)),
+        source_fit: 'crop_center', reference_detail: 'max_identity_2048', optimize_for_still: p.optimizeForStill !== false,
+      },
+    };
+    refs.slice(1).forEach((_, i) => { prep.inputs[`reference_image_${i + 2}`] = [String(20 + i), 0]; }); // reference_image_2..9
+    wf['5'] = prep;
+  } else {
+    wf['5'] = {
+      class_type: 'H3TextToImagePrepare',
+      inputs: {
+        clip: ['2', 0], prompt: String(p.prompt || '').trim(),
+        width: ['4', 0], height: ['4', 1],
+        quality_profile: p.qualityProfile || 'recommended | 5 frames', optimize_for_still: p.optimizeForStill !== false,
+      },
+    };
+  }
+
+  wf['6'] = { class_type: 'RandomNoise', inputs: { noise_seed: Number(p.seed) >= 0 ? Math.floor(Number(p.seed)) : Math.floor(Math.random() * 1e15) } };
+  wf['7'] = { class_type: 'BasicGuider', inputs: { model: lora ? ['15', 0] : ['1', 0], conditioning: ['5', 0] } };
+  if (lora) wf['15'] = { class_type: 'LoraLoaderModelOnly', inputs: { model: ['1', 0], lora_name: lora, strength_model: 1.0 } };
+  wf['8'] = { class_type: 'H3ImageSamplingPreset', inputs: { model: lora ? ['15', 0] : ['1', 0], sampling_profile: profile } };
+  wf['10'] = { class_type: 'SamplerCustomAdvanced', inputs: { noise: ['6', 0], guider: ['7', 0], sampler: ['8', 1], sigmas: ['8', 2], latent_image: ['5', 1] } };
+  wf['11'] = { class_type: 'H3ImageDecode', inputs: { samples: ['10', 0], vae: ['3', 0] } };
+  const sel = {
+    class_type: 'H3ImageFrameSelector',
+    inputs: {
+      frames: ['11', 0], strategy: 'decode_recommended', manual_index: 0, skip_first_frames: 0,
+      candidate_start: 0.0, candidate_end: 1.0, similarity_weight: mode === 'refedit' ? 0.35 : 0.6, top_k: 4,
+      recommended_index: ['11', 3],
+    },
+  };
+  if (mode === 'refedit') sel.inputs.source_image = ['5', 2];
+  wf['12'] = sel;
+  wf['13'] = { class_type: 'SaveImage', inputs: { images: ['12', 0], filename_prefix: p.prefix || 'h3i' } };
+  return wf;
+}
+
+// H3-Image 生成主入口（与 generateImage 同一套提交/轮询/取回骨架）
+async function generateH3Image({ prompt, mode, variant, turbo, aspectRatio, resolutionProfile, qualityProfile, optimizeForStill, seed, sourceFidelity, refImages }, onProgress, taskRef) {
+  const prog = (s, pct) => { if (typeof onProgress === 'function') onProgress(s, pct); };
+  const jobId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const base = baseUrl('zimage'); // 与文生图共用统一后端（本地 8189 / 远端同源切换）
+  const isRemote = getMode('zimage') === 'remote';
+  const m = mode === 'refedit' ? 'refedit' : 't2i';
+  if (!String(prompt || '').trim()) throw new Error('正向提示词不能为空');
+  if (m === 'refedit' && !(refImages || []).length) throw new Error('参考图编辑：请先上传或从系统选图（第一张为源图）');
+
+  // 版本闸门：Image Studio 需要 ≥0.37，提前给出人话报错（不等到 ComfyUI 节点缺失才炸）
+  prog('检查后端版本…', 3);
+  try {
+    const sr = await fetch(base + '/system_stats', { signal: AbortSignal.timeout(8000) });
+    const st = await sr.json();
+    const ver = String((st.system || {}).comfyui_version || '');
+    const num = (s) => s.split('.').map((x) => parseInt(x, 10) || 0);
+    const [a1, b1, c1] = num(ver); const [a2, b2, c2] = num(H3I_REQUIRED_VERSION);
+    if (ver && (a1 < a2 || (a1 === a2 && (b1 < b2 || (b1 === b2 && c1 < c2))))) {
+      throw new Error(`文生图H3 需要 ComfyUI ≥ ${H3I_REQUIRED_VERSION}（当前 ${ver}）。请到「设置 → 后端升级检测」查看升级指引`);
+    }
+  } catch (e) { if (String(e.message || '').includes('需要 ComfyUI')) throw e; /* 探测失败不拦截，交给提交环节报错 */ }
+
+  // 参考图送入 ComfyUI input（第一张=源图，其余=参考图2..9，上限 9 张）
+  const refNames = [];
+  if ((refImages || []).length) {
+    prog(`上传参考图（${Math.min(9, refImages.length)} 张）…`, 8);
+    for (let i = 0; i < Math.min(9, refImages.length); i++) {
+      const ext = (path.extname(refImages[i]) || '.png').slice(1) || 'png';
+      const name = `h3i_ref_${jobId}_${i}.${ext}`;
+      await placeInputTo(refImages[i], name, base, isRemote ? null : COMFY_DIR);
+      refNames.push(name);
+    }
+  }
+
+  prog('组装工作流…', 12);
+  const wf = buildH3ImageWorkflow({ mode: m, variant, turbo, prompt, aspectRatio, resolutionProfile, qualityProfile, optimizeForStill, seed, sourceFidelity, refNames, prefix: `h3i_${jobId}`, models: modelMap('h3i') });
+
+  prog('提交 ComfyUI…', 22);
+  const mon = progressMonitor(base);
+  const pr = await fetch(base + '/prompt', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: wf, client_id: mon.clientId }), signal: AbortSignal.timeout(30000),
+  });
+  const pj = await pr.json();
+  if (!pr.ok || !pj.prompt_id) throw new Error('ComfyUI 提交失败：' + JSON.stringify(pj).slice(0, 300));
+  const promptId = pj.prompt_id;
+  try { taskRef && taskRef.onSubmitted && taskRef.onSubmitted(promptId, base, wf); } catch { /* 登记失败不影响生成 */ }
+
+  prog('生成中（采样/解码）…', 30);
+  activeRuns.set(promptId, { kind: (taskRef && taskRef.kind) || 'h3i', jobId: String((taskRef && taskRef.jobId) || jobId), base, ts: Date.now(), cancelled: false });
+  const deadline = Date.now() + 30 * 60 * 1000;
+  let out = null; let lastStatus = '';
+  try {
+    while (Date.now() < deadline) {
+      checkCancelled(promptId);
+      const hr = await fetch(base + `/history/${promptId}`, { signal: AbortSignal.timeout(5000) });
+      const hist = await hr.json();
+      const entry = hist[promptId];
+      if (entry && entry.status) {
+        lastStatus = entry.status.status_str || lastStatus;
+        if (entry.status.completed) { out = extractImage(hist); break; }
+        if (entry.status.status_str === 'error') {
+          const msgs = readableError(entry.status.messages);
+          const zhHint = /not found|invalid class|returned no outputs/i.test(msgs) ? '\n若提示节点缺失：文生图H3 需要 ComfyUI ≥0.37 + ComfyUI-MiniMax-H3-Image-Studio 节点包' : '';
+          throw new Error('生成失败：' + (msgs.slice(0, 300) || '未知错误') + zhHint);
+        }
+      }
+      await pollProgress(mon, promptId, base, wf, prog, 30, lastStatus);
+      await sleep(2000);
+    }
+  } finally { activeRuns.delete(promptId); }
+  if (!out) throw new Error(`生成超时（最后状态：${lastStatus || '未知'}）`);
+
+  prog('取回图像…', 85);
+  const dstImage = path.join(outputDir(), `${jobId}.png`);
+  await fetchOutputTo(out, dstImage, base, isRemote ? null : COMFY_DIR);
+  prog('完成', 100);
+  return { imagePath: dstImage, promptId, status: lastStatus, workflow: wf };
+}
+
 // ---------- Qwen-Image-Layered（广告图 / PSD 分层图） ----------
 // 模型：qwen_image_layered_fp8mixed + qwen_2.5_vl_7b_fp8_scaled + qwen_image_layered_vae（grp=qil）
 // 节点均为 8189(ComfyUI 0.34) 内置核心节点，无需装任何自定义节点。
@@ -1401,4 +1602,4 @@ async function adoptRun({ base, promptId, kind, jobId, extract, deadlineMin = 13
 // 从任意 base（含本机 local 模式的 8189）经 HTTP /view 下载产物——收养路径统一走 HTTP，避免依赖当前模式
 async function downloadOutput(out, dst, base) { await fetchOutputTo(out, dst, base, null); }
 
-module.exports = { ensureComfy, ensureZimage, generate, generateImage, generateH3Video, ensureH3, zimageDefaults, h3Defaults, qilDefaults, generateQilImage, buildQilWorkflow, assemblePsd, extractImages, status, statusFor, modelMap, DEFAULT_MODELS, DEFAULT_NEGATIVE, seedModels, listLoras, runHighResFix, getMode, getUrl, baseUrl, setBackend, outputDir, lanIp, getListenAddr, configureComputeNode, UPLOAD_DIR, COMFY_DIR, PYTHON, FFMPEG_DIR, WORKFLOW_FLF, WORKFLOW_ZIMAGE, activeRuns, adoptRun, downloadOutput, syncModelPaths, selfHealBackend };
+module.exports = { ensureComfy, ensureZimage, generate, generateImage, generateH3Video, ensureH3, zimageDefaults, h3Defaults, qilDefaults, generateQilImage, buildQilWorkflow, assemblePsd, extractImages, status, statusFor, modelMap, DEFAULT_MODELS, DEFAULT_NEGATIVE, seedModels, listLoras, runHighResFix, getMode, getUrl, baseUrl, setBackend, outputDir, lanIp, getListenAddr, configureComputeNode, UPLOAD_DIR, COMFY_DIR, PYTHON, FFMPEG_DIR, WORKFLOW_FLF, WORKFLOW_ZIMAGE, activeRuns, adoptRun, downloadOutput, syncModelPaths, selfHealBackend, generateH3Image, h3iDefaults, buildH3ImageWorkflow, H3I_REQUIRED_VERSION };

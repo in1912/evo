@@ -19,7 +19,8 @@ const router = express.Router();
 
 const KINDS = {
   i2v: { table: 'gen_jobs', label: '图生视频', mod: genRouter },
-  zimage: { table: 'img_jobs', label: '文生图', mod: imgRouter },
+  zimage: { table: 'img_jobs', label: '文生图', mod: imgRouter, where: "AND j.source IN ('zimage','ad')" },
+  h3i: { table: 'img_jobs', label: '文生图H3', mod: imgRouter, where: "AND j.source='h3'" }, // v1.0.44 文生图H3 与文生图共表不同 source
   h3: { table: 'h3_jobs', label: 'H3 视频', mod: h3Router },
 };
 
@@ -61,7 +62,7 @@ router.get('/tasks', async (req, res) => {
     for (const [kind, K] of Object.entries(KINDS)) {
       const sql = `SELECT j.id, j.user_id, j.prompt, j.status, j.progress, j.progress_pct, j.duration_ms, j.created_at, u.username
          FROM ${K.table} j LEFT JOIN users u ON u.id = j.user_id
-         WHERE j.status IN ('running','pending') ${mineOnly ? 'AND j.user_id=?' : ''} ORDER BY j.id`;
+         WHERE j.status IN ('running','pending') ${K.where || ''} ${mineOnly ? 'AND j.user_id=?' : ''} ORDER BY j.id`;
       const rows = mineOnly ? db.prepare(sql).all(req.user.id) : db.prepare(sql).all();
       const pend = K.mod.queueApi ? K.mod.queueApi.pendingIds() : [];
       for (const row of rows) {
@@ -98,7 +99,7 @@ router.get('/tasks', async (req, res) => {
 // POST /api/tasks/:kind/:id/stop
 router.post('/tasks/:kind/:id/stop', async (req, res) => {
   const K = KINDS[req.params.kind];
-  if (!K) return res.status(400).json({ error: 'kind 只支持 i2v / zimage / h3' });
+  if (!K) return res.status(400).json({ error: 'kind 只支持 i2v / zimage / h3i / h3' });
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'id 不对' });
   const row = db.prepare(`SELECT * FROM ${K.table} WHERE id=?`).get(id);

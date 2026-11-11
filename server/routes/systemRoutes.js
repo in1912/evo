@@ -243,4 +243,44 @@ authedRouter.post('/system/gpu/free', async (req, res) => {
   }
 });
 
+// ---------- ComfyUI 升级检测（设置页「后端升级检测」卡片；仅管理员） ----------
+// 当前版本 = 统一后端 /system_stats 实时值；所需版本 = 文生图H3 的最低核心要求（Image Studio 节点包声明 ≥0.37）；
+// 最新版本 = 在线探测 GitHub Releases（gh-proxy 中转，8s 超时；离线/被墙只影响该字段，不影响本地比对结论）。
+authedRouter.get('/system/comfy-check', async (req, res) => {
+  if (!req.user || req.user.role !== 'admin') return res.status(403).json({ error: '仅管理员可检测' });
+  try {
+    const base = comfy.baseUrl('zimage');
+    let current = ''; let reachable = false; let vram = '';
+    try {
+      const r = await fetch(base + '/system_stats', { signal: AbortSignal.timeout(6000) });
+      if (r.ok) {
+        const st = await r.json();
+        current = String((st.system || {}).comfyui_version || '');
+        const dev = (st.devices || [])[0] || {};
+        vram = dev.name ? `${dev.name} · 显存 ${(Number(dev.vram_total || 0) / 1024 ** 3).toFixed(1)}GB` : '';
+        reachable = true;
+      }
+    } catch { /* 后端离线如实回报 */ }
+    let latest = ''; let online = false; let onlineNote = '';
+    try {
+      const r2 = await fetch('https://gh-proxy.com/https://api.github.com/repos/comfyanonymous/ComfyUI/releases/latest', { signal: AbortSignal.timeout(8000), headers: { 'User-Agent': 'evolveshot' } });
+      if (r2.ok) { const j = await r2.json(); latest = String(j.tag_name || '').replace(/^v/, ''); online = true; }
+      else onlineNote = `在线探测被拒（HTTP ${r2.status}）`;
+    } catch { onlineNote = '在线探测不可达（网络受限）；不影响本地版本比对'; }
+    const required = comfy.H3I_REQUIRED_VERSION || '0.37.0';
+    const cmp = (a, b) => { const x = String(a || '').split('.').map(Number), y = String(b || '').split('.').map(Number); for (let i = 0; i < 3; i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) - (y[i] || 0); } return 0; };
+    const meetsRequired = current ? cmp(current, required) >= 0 : null;
+    const hasUpdate = (current && latest) ? cmp(latest, current) > 0 : null;
+    res.json({
+      base, reachable, current, required, meetsRequired, latest, online, onlineNote, hasUpdate, vram,
+      checkedAt: Date.now(),
+      advice: !reachable ? '后端不可达：先启动算力端（start-model.bat）再检测'
+        : (meetsRequired === false ? `当前 ${current} 低于文生图H3 所需 ${required}：按升级流程换核心（队列空闲时执行；模型与节点均已就位）`
+        : (hasUpdate ? `已满足文生图H3（≥${required}）；线上有新版 ${latest}，可按需升级` : `已满足文生图H3（≥${required}），版本健康`)),
+    });
+  } catch (e) {
+    res.status(500).json({ error: '检测失败：' + (e.message || e) });
+  }
+});
+
 module.exports = { publicRouter, authedRouter };

@@ -647,7 +647,7 @@
               if (pp.gen_mode === 'hires') mode = '重绘'; else if (pp.gen_mode === 'upscale') mode = '超分';
             } catch (e) { /* 参数解析失败照样可选 */ }
             const file = basename(j.image_path);
-            return { id: j.id, file, wh, mode, src: j.source === 'ad' ? '广告图' : '文生图', url: authed('/api/image/output/' + file), prompt: String(j.prompt || '').slice(0, 40) };
+            return { id: j.id, file, wh, mode, src: { ad: '广告图', h3: '文生图H3' }[j.source] || '文生图Z', url: authed('/api/image/output/' + file), prompt: String(j.prompt || '').slice(0, 40) };
           });
         } catch (e) { alert('拉取历史图失败：' + e.message); this.pickOpen = false; }
         this.pickBusy = false;
@@ -822,7 +822,7 @@
     template: `
     <div>
       <div class="page-head" style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px">
-        <div style="min-width:0"><h2>文生图</h2><div class="desc">Z-Image 文生图：Lumina2 CLIP + Flux AE + Z-Image Turbo UNet，参数在下方功能控制框内调节</div></div>
+        <div style="min-width:0"><h2>文生图Z</h2><div class="desc">Z-Image 文生图（v1.0.44 起更名「文生图Z」，与「文生图H3」并列）：Lumina2 CLIP + Flux AE + Z-Image Turbo UNet，参数在下方功能控制框内调节</div></div>
         <div style="flex:none;display:flex;align-items:center;gap:12px">
           <div v-if="job || statusText" style="width:320px;max-width:38vw">
             <div class="progress"><div :style="{ width: showPct + '%', background: (job && job.status === 'failed') ? 'var(--danger)' : undefined }"></div></div>
@@ -1219,7 +1219,7 @@
               if (pp.gen_mode === 'hires') mode = '重绘'; else if (pp.gen_mode === 'upscale') mode = '超分';
             } catch (e) { /* 参数解析失败照样可选 */ }
             const file = basename(j.image_path);
-            return { id: j.id, file, wh, mode, src: j.source === 'ad' ? '广告图' : '文生图', url: authed('/api/image/output/' + file), prompt: String(j.prompt || '').slice(0, 40) };
+            return { id: j.id, file, wh, mode, src: { ad: '广告图', h3: '文生图H3' }[j.source] || '文生图Z', url: authed('/api/image/output/' + file), prompt: String(j.prompt || '').slice(0, 40) };
           });
         } catch (e) { alert('拉取历史图失败：' + e.message); this.pickOpen = false; }
         this.pickBusy = false;
@@ -1327,6 +1327,292 @@
       },
     },
     beforeUnmount() { if (this.timer) clearInterval(this.timer); if (this.qTimer) clearInterval(this.qTimer); },
+  };
+
+  // ---------- 文生图H3（MiniMax-H3-Image，v1.0.44） ----------
+  // 需求19：复制文生图页骨架、节点全部换成 H3-Image 管线（Image Studio），预留 int8 切换位
+  //（int8_convrot 默认 / GGUF Q4_0 预留 / P-H3 w4a8 小显存预留）。
+  // 需求20：参考图上传 + 从本系统历史生成图中选（第一张=源图，其余=参考图2..9，上限 9 张）；
+  // 有参考图时自动切参考图编辑（ref2va 模型，提示词=编辑指令），无参考图=纯文生图（fl2va + Turbo LoRA）。
+  const H3Image = {
+    template: `
+    <div>
+      <div class="page-head" style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px">
+        <div style="min-width:0"><h2>文生图H3</h2><div class="desc">MiniMax-H3-Image：fl2va int8_convrot + Turbo LoRA；带参考图自动切参考图编辑（ref2va）。需 ComfyUI ≥ 0.37（设置 → 后端升级检测）</div></div>
+        <div style="flex:none;display:flex;align-items:center;gap:12px">
+          <div v-if="job || statusText" style="width:320px;max-width:38vw">
+            <div class="progress"><div :style="{ width: showPct + '%', background: (job && job.status === 'failed') ? 'var(--danger)' : undefined }"></div></div>
+            <div class="muted" style="display:flex;align-items:center;gap:8px;margin-top:4px;white-space:nowrap;font-size:12px">
+              <span v-if="busy" class="spin"></span><b>{{ showPct }}%</b><span v-if="elapsedText">{{ elapsedText }}</span><span class="ellip" :title="progressText">{{ progressText }}</span>
+            </div>
+          </div>
+          <button class="btn primary" :disabled="busy" @click="go">{{ busy ? '生成中' : '开始生成' }}</button>
+          <button v-if="busy" class="btn danger" @click="stopJob" title="停止当前任务（排队中的直接出队，执行中的安全打断）">停止</button>
+        </div>
+      </div>
+      <div v-if="job && job.error" class="alert err" style="margin-bottom:12px">{{ job.error }}</div>
+
+      <div class="card">
+        <h3 style="margin:0 0 12px">功能控制框</h3>
+        <div class="field"><label>正向提示词{{ refs.length ? '（编辑指令：说明怎么改源图，可用 <Picture 1>/<Picture 2> 指代图片）' : '（必填）' }}</label><textarea v-model="p.prompt" style="min-height:120px"></textarea></div>
+        <div class="row">
+          <div class="field"><label>模型变体（int8 切换位）</label>
+            <select v-model="p.variant">
+              <option value="int8">int8_convrot（默认 · 全质量）</option>
+              <option value="gguf">GGUF Q4_0（预留 · 换核后开放）</option>
+              <option value="ph3">P-H3 w4a8 小显存（预留 · 节点包待装）</option>
+            </select>
+          </div>
+          <div class="field"><label>采样档位（Turbo LoRA 与配方成对，不可混搭）</label>
+            <select v-model="p.turbo" :disabled="!!refs.length" :title="refs.length ? '参考图编辑固定 base 20 步（ref2v Turbo 未配）' : ''">
+              <option value="8">Turbo 8 步（默认）</option>
+              <option value="4">Turbo 4 步（v1.2 配方）</option>
+              <option value="off">base 20 步（最稳）</option>
+            </select>
+          </div>
+          <div class="field"><label>画面比例</label>
+            <select v-model="p.aspect_ratio">
+              <option v-for="a in aspectList" :key="a" :value="a">{{ a }}</option>
+              <option v-if="refs.length" value="source image">source image（跟随源图）</option>
+            </select>
+          </div>
+          <div class="field"><label>分辨率档位</label>
+            <select v-model="p.resolution_profile"><option v-for="r in resList" :key="r" :value="r">{{ r }}</option></select>
+          </div>
+          <div class="field"><label>质量档位（潜在帧数：多帧更稳更慢）</label>
+            <select v-model="p.quality_profile"><option v-for="q in qualList" :key="q" :value="q">{{ q }}</option></select>
+          </div>
+          <div class="field"><label>种子（-1 随机）</label><input v-model="p.seed" /></div>
+          <div class="field" v-if="refs.length" style="min-width:220px"><label>源图保真度（{{ p.source_fidelity }} · 低=敢改，高=守形）</label><input type="range" min="0" max="1" step="0.05" v-model.number="p.source_fidelity" style="width:100%" /></div>
+          <div class="field" style="min-width:0;flex:none;display:flex;align-items:flex-end;padding-bottom:4px">
+            <label class="chk" style="display:flex;align-items:center;gap:6px;white-space:nowrap"><input type="checkbox" v-model="p.optimize_for_still" /> 静图优化（optimize_for_still）</label>
+          </div>
+        </div>
+
+        <h3 style="margin:18px 0 8px">参考图 <span class="muted" style="font-weight:400;font-size:12px">（第一张=源图，最多再选 8 张=参考图 2..9；不选 = 纯文生图）</span></h3>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+          <div v-for="(r, i) in refs" :key="i" style="position:relative;width:86px;height:86px;border:1px solid rgba(128,128,128,.35);border-radius:8px;overflow:hidden;flex:none">
+            <img :src="r.dataUrl" style="width:100%;height:100%;object-fit:cover;cursor:zoom-in" :title="r.name" @click="zoomRef(i)" />
+            <button class="btn sm" style="position:absolute;top:2px;right:2px;padding:0 6px;line-height:20px" @click="rmRef(i)" title="移除">✕</button>
+            <div style="position:absolute;left:0;bottom:0;right:0;background:rgba(0,0,0,.55);color:#fff;font-size:11px;text-align:center;padding:1px 0">{{ i === 0 ? '源图' : '参考' + (i + 1) }}</div>
+          </div>
+          <button class="btn sm" @click="$refs.refFile.click()">上传图片</button>
+          <input ref="refFile" type="file" accept="image/*" multiple style="display:none" @change="onRefFiles" />
+          <button class="btn sm" @click="loadPick">从系统选图</button>
+          <span class="muted" style="font-size:12px">来源：本地上传 / 本系统历史生成图（文生图Z · 广告图 · 文生图H3）</span>
+        </div>
+
+        <div v-if="pickOpen" class="overlay" @click.self="pickOpen = false">
+          <div class="card" style="max-width:880px;width:94vw;max-height:82vh;overflow:auto">
+            <h3 style="margin:0 0 10px">从系统选图（最近完成的生成图）</h3>
+            <div v-if="pickBusy" style="padding:24px;text-align:center;opacity:.7">加载中…</div>
+            <div v-else-if="!pickList.length" style="padding:24px;text-align:center;opacity:.7">还没有已完成的生成图</div>
+            <div v-else style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px">
+              <div v-for="it in pickList" :key="it.id" title="点选此图" style="cursor:pointer;border:1px solid rgba(128,128,128,.35);border-radius:8px;padding:6px;text-align:center" @click="pickOne(it)">
+                <img :src="it.url" style="width:100%;height:92px;object-fit:cover;border-radius:4px" />
+                <div style="font-size:12px;margin-top:4px">{{ it.src }}<span v-if="it.mode"> · {{ it.mode }}</span></div>
+                <div style="font-size:11px;opacity:.6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ it.prompt || it.file }}</div>
+              </div>
+            </div>
+            <div style="margin-top:12px;text-align:right"><button class="btn sm" @click="pickOpen = false">取消</button></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:16px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+          <h3 style="margin:0">生成队列（文生图H3）</h3>
+          <button class="btn sm" @click="openFolder">打开输出目录</button>
+        </div>
+        <table>
+          <thead><tr><th>ID</th><th>状态</th><th>进度</th><th>耗时</th><th>模式</th><th>提示词</th><th>操作</th></tr></thead>
+          <tbody>
+            <tr v-for="q in queuePage" :key="q.id">
+              <td>#{{ q.id }}</td>
+              <td><span class="badge" :class="typeBadge(q.status)">{{ statusLabel(q.status) }}</span></td>
+              <td style="min-width:140px"><div class="progress" style="height:6px"><div :style="{ width: (q.progress_pct || 0) + '%' }"></div></div><span class="muted" style="font-size:11px">{{ q.progress }}</span></td>
+              <td class="muted">{{ fmtDur(q.duration_ms) }}</td>
+              <td>{{ modeOf(q) }}</td>
+              <td class="ellip" :title="q.prompt" style="max-width:260px">{{ q.prompt }}</td>
+              <td style="white-space:nowrap">
+                <button class="btn sm" @click="regen(q)" title="把该任务的参数还原到上方参数框（参考图需重选）">再生成</button>
+                <a v-if="q.image_path" class="btn sm" :href="authed('/api/image/output/' + basename(q.image_path))" download>下载</a>
+                <a class="btn sm" :href="authed('/api/image/workflow/' + q.id)">工作流</a>
+                <span v-if="q.status==='failed'" style="color:var(--danger)">{{ q.error }}</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-if="queue.length > qPageSize || qPage > 0" class="row" style="flex:none;justify-content:flex-end;align-items:center;gap:8px;margin-top:10px;flex-wrap:wrap">
+          <span class="muted">共 {{ queue.length }} 条</span>
+          <button class="btn sm" :disabled="qPage <= 0" @click="qPage--">‹ 上一页</button>
+          <span class="muted">{{ qPage + 1 }} / {{ qTotalPages }}</span>
+          <button class="btn sm" :disabled="(qPage + 1) * qPageSize >= queue.length" @click="qPage++">下一页 ›</button>
+        </div>
+      </div>
+    </div>`,
+    data() {
+      return {
+        p: { prompt: '', variant: 'int8', turbo: '8', aspect_ratio: '1:1 square', resolution_profile: 'native detail | 0.98 MP', quality_profile: 'recommended | 5 frames', optimize_for_still: true, seed: -1, source_fidelity: 0.6 },
+        refs: [],            // [{ name, dataUrl, ext, data }]（data=base64，提交用；文件大不进 params）
+        aspectList: ['1:1 square', '4:5 portrait', '3:4 portrait', '2:3 portrait', '9:16 portrait', '16:9 landscape', '3:2 landscape', '4:3 landscape', '21:9 ultrawide'],
+        resList: ['fast preview | 0.40 MP', 'balanced | 0.70 MP', 'high | 0.90 MP', 'native detail | 0.98 MP', 'high-res | 2.00 MP', 'ultra | 4.00 MP', 'ultra+ | 8.00 MP'],
+        qualList: ['single image | 1 frame (image VAE)', 'recommended | 5 frames', 'extended quality | 9 frames', 'high quality | 13 frames', 'maximum quality | 20 frames (slow)'],
+        pickOpen: false, pickBusy: false, pickList: [],
+        busy: false, statusText: '', job: null, timer: null, now: 0,
+        queue: [], qTimer: null, qPage: 0, qPageSize: 10, pctHigh: 0,
+        _clock: null, _t0: 0,
+      };
+    },
+    computed: {
+      qTotalPages() { return Math.max(1, Math.ceil((this.queue || []).length / this.qPageSize)); },
+      queuePage() { return (this.queue || []).slice(this.qPage * this.qPageSize, (this.qPage + 1) * this.qPageSize); },
+      jobProgressPct() {
+        if (!this.job) return 0;
+        if (this.job.status === 'done' || this.job.status === 'failed') return 100;
+        const n = Number(this.job.progress_pct);
+        return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0;
+      },
+      showPct() { return Math.max(this.pctHigh, this.jobProgressPct); }, // 只进不退（同文生图Z 防抖）
+      progressText() {
+        if (this.job && this.job.progress) return this.job.progress;
+        if (this.job && this.job.status === 'failed') return '生成失败';
+        return this.statusText || '准备中…';
+      },
+      elapsedText() {
+        if (!this.busy || !this._t0) return '';
+        const s = Math.max(0, Math.floor(((this.now || Date.now()) - this._t0) / 1000));
+        return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+      },
+    },
+    async mounted() {
+      this.loadDefaults();
+      this.refreshQueue();
+      this.qTimer = setInterval(() => this.refreshQueue(), 3000);
+    },
+    beforeUnmount() { if (this.timer) clearInterval(this.timer); if (this.qTimer) clearInterval(this.qTimer); if (this._clock) clearInterval(this._clock); },
+    methods: {
+      authed, basename,
+      startClock(fromTs) { this._t0 = fromTs || Date.now(); if (!this._clock) this._clock = setInterval(() => { this.now = Date.now(); }, 1000); this.now = Date.now(); },
+      stopClock() { if (this._clock) { clearInterval(this._clock); this._clock = null; } },
+      statusLabel(s) { return { pending: '排队中', running: '生成中', done: '完成', failed: '失败' }[s] || s; },
+      typeBadge(s) { return { done: 'ok', failed: 'err', running: 'warn', pending: 'dim' }[s] || 'dim'; },
+      fmtDur(ms) {
+        if (!ms || ms <= 0) return '-';
+        if (ms < 1000) return ms + 'ms';
+        if (ms < 60000) return (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + 's';
+        const m = Math.floor(ms / 60000), s = Math.round((ms % 60000) / 1000);
+        return m + 'm' + (s ? s + 's' : '');
+      },
+      modeOf(q) { try { return (JSON.parse(q.params || '{}').mode === 'refedit') ? '参考图编辑' : '文生图'; } catch { return '-'; } },
+      async loadDefaults() {
+        try {
+          const d = await api('GET', '/image/h3-defaults');
+          if (d.prompt && !this.p.prompt) this.p.prompt = d.prompt;
+          for (const k of ['variant', 'turbo', 'aspect_ratio', 'resolution_profile', 'quality_profile', 'source_fidelity']) if (d[k] !== undefined) this.p[k] = d[k];
+          if (d.optimize_for_still !== undefined) this.p.optimize_for_still = !!d.optimize_for_still;
+        } catch (e) { /* 后端不可达时保留默认值 */ }
+      },
+      onRefFiles(e) {
+        const files = [...(e.target.files || [])]; e.target.value = '';
+        for (const f of files) {
+          if (this.refs.length >= 9) { alert('最多 9 张（源图 + 8 张参考图）'); break; }
+          const ext = (f.name.split('.').pop() || 'png').toLowerCase();
+          const r = new FileReader();
+          r.onload = () => { if (this.refs.length < 9) this.refs.push({ name: f.name, dataUrl: r.result, ext, data: r.result }); };
+          r.readAsDataURL(f);
+        }
+      },
+      rmRef(i) { this.refs.splice(i, 1); },
+      zoomRef(i) { openViewer([{ kind: 'image', url: this.refs[i].dataUrl, title: this.refs[i].name, sub: i === 0 ? '源图' : '参考' + (i + 1) }], 0); },
+      async loadPick() {
+        // 需求20：从系统选图——文生图Z/广告图/文生图H3 最近完成的产物（不带 source 过滤，普通用户只见自己的）
+        this.pickOpen = true; this.pickBusy = true;
+        try {
+          const d = await api('GET', '/image/queue');
+          this.pickList = (d.jobs || []).filter((j) => j.status === 'done' && j.image_path).map((j) => {
+            let mode = '';
+            try { mode = JSON.parse(j.params || '{}').mode === 'refedit' ? '参考编辑' : ''; } catch { }
+            const file = basename(j.image_path);
+            return { id: j.id, file, mode, src: { ad: '广告图', h3: '文生图H3' }[j.source] || '文生图Z', url: authed('/api/image/output/' + file), prompt: String(j.prompt || '').slice(0, 40) };
+          });
+        } catch (e) { alert('拉取历史图失败：' + e.message); this.pickOpen = false; }
+        this.pickBusy = false;
+      },
+      async pickOne(it) {
+        if (this.refs.length >= 9) { alert('最多 9 张（源图 + 8 张参考图）'); return; }
+        this.pickBusy = true;
+        try {
+          const r = await fetch(it.url);
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          const blob = await r.blob();
+          const dataUrl = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = () => rej(new Error('读取失败')); fr.readAsDataURL(blob); });
+          this.refs.push({ name: it.file, dataUrl, ext: (it.file.split('.').pop() || 'png'), data: dataUrl });
+          this.pickOpen = false;
+        } catch (e) { alert('选图失败：' + e.message); }
+        this.pickBusy = false;
+      },
+      async refreshQueue() {
+        try {
+          const d = await api('GET', '/image/queue?source=h3'); this.queue = d.jobs || [];
+          if (this.qPage >= this.qTotalPages) this.qPage = this.qTotalPages - 1;
+          // 切页回来接续自己进行中的任务（同文生图Z）
+          if (!this.busy) {
+            const run = (this.queue || []).find((q) => (q.status === 'running' || q.status === 'pending') && q.user_id === store.user.id);
+            if (run) {
+              this.busy = true; this.statusText = run.status === 'pending' ? '排队中…' : '生成中…';
+              this.startClock(Date.parse(String(run.created_at || '').replace(' ', 'T')) || undefined);
+              this.poll(run.id);
+            }
+          }
+        } catch (e) { }
+      },
+      async openFolder() { try { await api('POST', '/image/open-output-dir'); } catch (e) { alert(e.message); } },
+      regen(q) {
+        let pp = {};
+        try { pp = JSON.parse(q.params || '{}'); } catch (e) { alert('该任务参数无法解析'); return; }
+        for (const k of ['variant', 'turbo', 'aspect_ratio', 'resolution_profile', 'quality_profile', 'source_fidelity', 'seed']) if (pp[k] !== undefined) this.p[k] = pp[k];
+        if (pp.optimize_for_still !== undefined) this.p.optimize_for_still = !!pp.optimize_for_still;
+        this.p.prompt = String(q.prompt || '');
+        this.statusText = '已还原任务 #' + q.id + ' 的参数（参考图不随任务保存，需重新选择），确认后点「开始生成」';
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      },
+      async go() {
+        if (!String(this.p.prompt || '').trim()) { alert('请输入正向提示词'); return; }
+        if (this.p.variant !== 'int8') { alert('该变体是预留切换位，暂未开放：先在「设置 → 后端升级检测」确认环境，等开放后无需改代码即可切换'); return; }
+        this.busy = true; this.job = null; this.statusText = '提交中…'; this.pctHigh = 0; this.startClock();
+        try {
+          const body = {
+            prompt: this.p.prompt, source: 'h3',
+            variant: this.p.variant, turbo: this.p.turbo,
+            aspect_ratio: this.p.aspect_ratio, resolution_profile: this.p.resolution_profile, quality_profile: this.p.quality_profile,
+            optimize_for_still: this.p.optimize_for_still, seed: this.p.seed, source_fidelity: this.p.source_fidelity,
+            images: this.refs.map((r) => ({ data: r.data, ext: r.ext })),
+          };
+          const _busy = await busyBefore();
+          const d = await api('POST', '/image/generate', body);
+          this.poll(d.id); this.refreshQueue(); queueBusyNotice(_busy);
+        } catch (e) { alert(e.message); this.statusText = ''; this.busy = false; this.stopClock(); }
+      },
+      poll(id) {
+        this.timer = setInterval(async () => {
+          try {
+            const d = await api('GET', '/image/job/' + id);
+            this.job = d.job;
+            const n = Number(d.job.progress_pct);
+            if (Number.isFinite(n)) this.pctHigh = Math.max(this.pctHigh, Math.min(100, n));
+            if (d.job.status === 'done') { this.statusText = '完成'; this.busy = false; this.stopClock(); clearInterval(this.timer); this.refreshQueue(); }
+            else if (d.job.status === 'failed') { this.statusText = '失败'; this.busy = false; this.stopClock(); clearInterval(this.timer); this.refreshQueue(); }
+            else this.statusText = d.job.progress || (d.job.status === 'pending' ? '排队中…' : '生成中…');
+          } catch (e) { clearInterval(this.timer); this.busy = false; this.stopClock(); this.statusText = ''; }
+        }, 3000);
+      },
+      async stopJob() {
+        if (!this.job || !this.job.id) { alert('任务刚提交、还没登记好，1-2 秒后再点停止'); return; }
+        try { await api('POST', '/tasks/h3i/' + this.job.id + '/stop'); this.statusText = '停止中…'; }
+        catch (e) { alert(e.message); }
+      },
+    },
   };
 
   // ---------- 广告图（Qwen-Image-Layered：文生分层图 + PSD 导出，v1.0.23） ----------
@@ -1868,7 +2154,7 @@
               if (pp.gen_mode === 'hires') mode = '重绘'; else if (pp.gen_mode === 'upscale') mode = '超分';
             } catch (e) { /* 参数解析失败照样可选 */ }
             const file = basename(j.image_path);
-            return { id: j.id, file, wh, mode, src: j.source === 'ad' ? '广告图' : '文生图', url: authed('/api/image/output/' + file), prompt: String(j.prompt || '').slice(0, 40) };
+            return { id: j.id, file, wh, mode, src: { ad: '广告图', h3: '文生图H3' }[j.source] || '文生图Z', url: authed('/api/image/output/' + file), prompt: String(j.prompt || '').slice(0, 40) };
           });
         } catch (e) { alert('拉取历史图失败：' + e.message); this.pickOpen = false; }
         this.pickBusy = false;
@@ -3482,6 +3768,7 @@
           <button class="tab" :class="{active: tab==='invites'}" @click="tab='invites'">邀请码</button>
           <button class="tab" :class="{active: tab==='cert'}" @click="tab='cert'">HTTPS 证书</button>
           <button class="tab" :class="{active: tab==='upgrade'}" @click="tab='upgrade'">系统升级</button>
+          <button class="tab" :class="{active: tab==='comfy'}" @click="tab='comfy'; comfyCheck()">后端升级</button>
           <button class="tab" :class="{active: tab==='logs'}" @click="tab='logs'">登录日志 / IP 封禁</button>
         </template>
         <button class="tab" :class="{active: tab==='credits'}" @click="tab='credits'">致谢</button>
@@ -3635,6 +3922,26 @@
         </tr></tbody></table>
       </div>
 
+      <div v-if="tab==='comfy'" class="card">
+        <h3>ComfyUI 后端升级检测</h3>
+        <div class="muted" style="margin-bottom:10px">检测统一后端（{{ comfy.chk ? comfy.chk.base : '8189' }}）的 ComfyUI 版本：是否满足「文生图H3」（需 ≥ {{ comfy.chk ? comfy.chk.required : '0.37' }}）、线上是否有新版。在线探测走 gh-proxy，离线不影响本地结论。</div>
+        <div class="row" style="flex:none;margin-bottom:12px">
+          <button class="btn primary" :disabled="comfy.busy" @click="comfyCheck">{{ comfy.busy ? '检测中…' : '立即检测' }}</button>
+          <span v-if="comfy.chk" class="muted">检测于 {{ fmtTime(new Date(comfy.chk.checkedAt)) }}</span>
+        </div>
+        <template v-if="comfy.chk">
+          <div class="alert" :class="!comfy.chk.reachable ? 'err' : (comfy.chk.meetsRequired === false ? 'err' : 'ok')" style="margin-bottom:12px">{{ comfy.chk.advice }}</div>
+          <table><tbody>
+            <tr><td class="muted" style="width:140px">后端状态</td><td><span class="badge" :class="comfy.chk.reachable ? 'ok' : 'err'">{{ comfy.chk.reachable ? '在线' : '不可达' }}</span></td></tr>
+            <tr><td class="muted">当前版本</td><td><b>{{ comfy.chk.current || '未知' }}</b> <span v-if="comfy.chk.meetsRequired !== null" class="badge" :class="comfy.chk.meetsRequired ? 'ok' : 'err'">{{ comfy.chk.meetsRequired ? '满足文生图H3' : '低于所需' }}</span></td></tr>
+            <tr><td class="muted">文生图H3 所需</td><td>≥ {{ comfy.chk.required }}（Image Studio 节点包要求）</td></tr>
+            <tr><td class="muted">线上最新</td><td>{{ comfy.chk.latest || ('未知 ' + (comfy.chk.onlineNote || '')) }} <span v-if="comfy.chk.hasUpdate" class="badge warn">有新版</span></td></tr>
+            <tr v-if="comfy.chk.vram"><td class="muted">算力卡</td><td>{{ comfy.chk.vram }}</td></tr>
+          </tbody></table>
+          <div class="muted" style="margin-top:12px;font-size:12px">升级流程（队列空闲时执行）：① 备份现有 ComfyUI 目录 → ② 换入新版核心（模型/节点包不动）→ ③ start-model.bat 拉起 → ④ 回到本页复检。G 盘环境已内置路径自愈，挪动/升级后首次启动会自动修正引用。</div>
+        </template>
+      </div>
+
       <div v-if="tab==='logs'" class="card">
         <h3>登录日志</h3>
         <div class="muted" style="margin-bottom:8px">
@@ -3708,6 +4015,7 @@
         ],
         cert: { cn: '', days: 820, san: '', status: null },
         up: { version: '', pkgVer: '', list: [] },
+        comfy: { chk: null, busy: false },
         ai: { url: '', key: '', model: '' }, aiShow: false, aiTest: null, aiBusy: false,
         logs: [], bans: [], banIp: '', banNote: '',
         logsPage: 1, logsSize: 10,
@@ -3777,6 +4085,11 @@
       async loadUp() { const d = await api('GET', '/upgrade/status'); this.up.version = d.version; await this.listUp(); },
       async listUp() { const d = await api('GET', '/upgrade/list'); this.up.list = d.list; },
       async pkg() { try { const d = await api('POST', '/upgrade/package', { version: this.up.pkgVer }); this.listUp(); alert('已打包：' + d.file); } catch (e) { alert(e.message); } },
+      async comfyCheck() { // v1.0.44 ComfyUI 后端升级检测（GET /system/comfy-check，仅管理员）
+        this.comfy.busy = true;
+        try { const d = await api('GET', '/system/comfy-check'); this.comfy.chk = d; } catch (e) { alert('检测失败：' + e.message); }
+        this.comfy.busy = false;
+      },
       async apply(f) { if (!confirm('应用升级包 ' + f.file + ' 并覆盖当前代码？')) return; try { await api('POST', '/upgrade/apply', { file: f.file }); await this.restart('升级完成'); } catch (e) { alert(e.message); } },
       async loadLogs() { const d = await api('GET', '/auth/login-logs'); this.logs = d.logs; },
       async loadBans() { const d = await api('GET', '/ip-bans'); this.bans = d.bans; },
@@ -5012,7 +5325,8 @@
           <div class="sub">EvolveShot</div>
         </div>
         <nav class="nav">
-          <button v-if="can('zimage')" class="nav-item" :class="{active: store.route==='zimage'}" @click="store.nav('zimage')"><span class="material-icons">image</span>文生图</button>
+          <button v-if="can('zimage')" class="nav-item" :class="{active: store.route==='zimage'}" @click="store.nav('zimage')"><span class="material-icons">image</span>文生图Z</button>
+          <button v-if="can('zimage')" class="nav-item" :class="{active: store.route==='h3image'}" @click="store.nav('h3image')"><span class="material-icons">auto_awesome</span>文生图H3</button>
           <button v-if="can('zimage')" class="nav-item" :class="{active: store.route==='ad'}" @click="store.nav('ad')"><span class="material-icons">layers</span>广告图</button>
           <button v-if="can('generate')" class="nav-item" :class="{active: store.route==='generate'}" @click="store.nav('generate')"><span class="material-icons">switch_video</span>首尾视频</button>
           <button v-if="can('h3')" class="nav-item" :class="{active: store.route==='h3'}" @click="store.nav('h3')"><span class="material-icons">movie</span>视频生成</button>
@@ -5043,7 +5357,7 @@
     data() { return { store }; },
     computed: {
       view() {
-        const m = { generate: Generate, zimage: ZImage, ad: ZImageAd, h3: H3, ha: HaPanel, tasks: Tasks, history: MyHistory, 'user-history': UserHistory, models: Models, voice: Voice, edit: Edit, settings: Settings };
+        const m = { generate: Generate, zimage: ZImage, h3image: H3Image, ad: ZImageAd, h3: H3, ha: HaPanel, tasks: Tasks, history: MyHistory, 'user-history': UserHistory, models: Models, voice: Voice, edit: Edit, settings: Settings };
         return m[store.route] || Generate;
       },
       comfyBadge() {
@@ -5097,6 +5411,7 @@
   app.component('Login', Login);
   app.component('Generate', Generate);
   app.component('ZImage', ZImage);
+  app.component('H3Image', H3Image);
   app.component('ZImageAd', ZImageAd);
   app.component('H3', H3);
   app.component('HaPanel', HaPanel);
