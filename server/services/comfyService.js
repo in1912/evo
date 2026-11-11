@@ -631,10 +631,7 @@ async function placeInput(imagePath, inputName) {
 // 取回最终视频：本地 = 从 ComfyUI/output 复制；远端 = 经 /view 下载
 async function fetchOutput(out, dstVideo) {
   if (getMode() === 'remote') {
-    const q = new URLSearchParams({ filename: out.filename, subfolder: normSub(out.subfolder), type: out.type || 'output' });
-    const r = await fetch(baseUrl() + '/view?' + q.toString(), { signal: AbortSignal.timeout(120000) });
-    if (!r.ok) throw new Error('下载远端视频失败 HTTP ' + r.status);
-    fs.writeFileSync(dstVideo, Buffer.from(await r.arrayBuffer()));
+    await fetchViewWithRetry(baseUrl(), out, dstVideo, 120000);
     return;
   }
   const srcVideo = path.join(COMFY_DIR, 'output', out.subfolder || '', out.filename);
@@ -660,13 +657,29 @@ async function placeInputTo(imagePath, inputName, base, comfyDir) {
   fs.copyFileSync(imagePath, inputDest);
 }
 
-// 通用：取回输出（comfyDir 为空 = 经 /view 下载；非空 = 从该 ComfyUI 的 output 目录复制）
+// v1.0.52 需求26：取回产物容错——/view 下载中段断连（undici terminated，2026-11-11 生产实踩：
+// h3i 图已在 ComfyUI 落盘但取回 fetch 断连把任务判死「100%取回图像…terminated」）重试最多 5 次；
+// 产物写盘前先下完整 buffer，半截文件不落盘。
+async function fetchViewWithRetry(base, out, dst, timeoutMs = 180000) {
+  const q = new URLSearchParams({ filename: out.filename, subfolder: normSub(out.subfolder), type: out.type || 'output' });
+  let lastErr = null;
+  for (let i = 0; i < 5; i++) {
+    try {
+      const r = await fetch(base + '/view?' + q.toString(), { signal: AbortSignal.timeout(timeoutMs) });
+      if (!r.ok) throw new Error('下载远端输出失败 HTTP ' + r.status);
+      const buf = Buffer.from(await r.arrayBuffer());
+      if (!buf || buf.length < 64) throw new Error('下载内容为空（' + buf.length + ' 字节）');
+      fs.writeFileSync(dst, buf);
+      return;
+    } catch (e) { lastErr = e; await sleep(2500); }
+  }
+  throw lastErr || new Error('下载远端输出失败');
+}
+
+// 通用：取回输出（comfyDir 为空 = 经 /view 下载（带重试）；非空 = 从该 ComfyUI 的 output 目录复制）
 async function fetchOutputTo(out, dst, base, comfyDir) {
   if (!comfyDir) {
-    const q = new URLSearchParams({ filename: out.filename, subfolder: normSub(out.subfolder), type: out.type || 'output' });
-    const r = await fetch(base + '/view?' + q.toString(), { signal: AbortSignal.timeout(180000) });
-    if (!r.ok) throw new Error('下载远端输出失败 HTTP ' + r.status);
-    fs.writeFileSync(dst, Buffer.from(await r.arrayBuffer()));
+    await fetchViewWithRetry(base, out, dst, 180000);
     return;
   }
   const src = path.join(comfyDir, 'output', out.subfolder || '', out.filename);
@@ -1230,7 +1243,7 @@ function h3iDefaults() {
     vae_name: 'minimax_h3_video_vae_fp16.safetensors',
     aspect_ratio: 'custom',                // v1.0.47 需求26：默认自定义尺寸（宽高框常显可填；预设档仍可选）
     resolution_profile: 'native detail | 0.98 MP',
-    quality_profile: 'recommended | 5 frames',
+    quality_profile: 'single image | 1 frame (image VAE)',   // 需求27：默认 1 帧最快档（节点注：video VAE 解码可用、稍软；专用 image VAE 文件未配）
     optimize_for_still: true,
     turbo: '8',                            // '8' | '4' | 'off'（t2i 用 Turbo LoRA；参考图编辑固定 base 20 步）
     similarity_weight: '',                 // 需求25：帧选优相似度权重（空=自动：t2i 0.6 / refedit 0.35）
@@ -1294,7 +1307,7 @@ function buildH3ImageWorkflow(p) {
         clip: ['2', 0], vae: ['3', 0], source_image: ['0', 0],
         edit_instruction: String(p.prompt || '').trim(),
         width: custom ? cw : ['4', 0], height: custom ? ch : ['4', 1],
-        quality_profile: p.qualityProfile || 'recommended | 5 frames',
+        quality_profile: p.qualityProfile || 'single image | 1 frame (image VAE)',
         source_fidelity: Math.max(0, Math.min(1, Number(p.sourceFidelity) || 0.6)),
         source_fit: 'crop_center', reference_detail: 'max_identity_2048', optimize_for_still: p.optimizeForStill !== false,
       },
@@ -1307,7 +1320,7 @@ function buildH3ImageWorkflow(p) {
       inputs: {
         clip: ['2', 0], prompt: String(p.prompt || '').trim(),
         width: custom ? cw : ['4', 0], height: custom ? ch : ['4', 1],
-        quality_profile: p.qualityProfile || 'recommended | 5 frames', optimize_for_still: p.optimizeForStill !== false,
+        quality_profile: p.qualityProfile || 'single image | 1 frame (image VAE)', optimize_for_still: p.optimizeForStill !== false,
       },
     };
   }
@@ -1700,4 +1713,4 @@ async function adoptRun({ base, promptId, kind, jobId, extract, deadlineMin = 13
 // 从任意 base（含本机 local 模式的 8189）经 HTTP /view 下载产物——收养路径统一走 HTTP，避免依赖当前模式
 async function downloadOutput(out, dst, base) { await fetchOutputTo(out, dst, base, null); }
 
-module.exports = { ensureComfy, ensureZimage, fetchHistory, freeIfKindSwitch, generate, generateImage, generateH3Video, buildH3Workflow, ensureH3, zimageDefaults, h3Defaults, qilDefaults, generateQilImage, buildQilWorkflow, assemblePsd, extractImages, status, statusFor, modelMap, DEFAULT_MODELS, DEFAULT_NEGATIVE, seedModels, listLoras, runHighResFix, getMode, getUrl, baseUrl, setBackend, outputDir, lanIp, getListenAddr, configureComputeNode, UPLOAD_DIR, COMFY_DIR, PYTHON, FFMPEG_DIR, WORKFLOW_FLF, WORKFLOW_ZIMAGE, activeRuns, adoptRun, downloadOutput, syncModelPaths, selfHealBackend, generateH3Image, h3iDefaults, buildH3ImageWorkflow, H3I_REQUIRED_VERSION };
+module.exports = { ensureComfy, ensureZimage, fetchHistory, freeIfKindSwitch, fetchViewWithRetry, fetchOutputTo, generate, generateImage, generateH3Video, buildH3Workflow, ensureH3, zimageDefaults, h3Defaults, qilDefaults, generateQilImage, buildQilWorkflow, assemblePsd, extractImages, status, statusFor, modelMap, DEFAULT_MODELS, DEFAULT_NEGATIVE, seedModels, listLoras, runHighResFix, getMode, getUrl, baseUrl, setBackend, outputDir, lanIp, getListenAddr, configureComputeNode, UPLOAD_DIR, COMFY_DIR, PYTHON, FFMPEG_DIR, WORKFLOW_FLF, WORKFLOW_ZIMAGE, activeRuns, adoptRun, downloadOutput, syncModelPaths, selfHealBackend, generateH3Image, h3iDefaults, buildH3ImageWorkflow, H3I_REQUIRED_VERSION };

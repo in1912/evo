@@ -207,6 +207,63 @@
     beforeUnmount() { this.stopClock(); },
   };
 
+  // ---------- 需求28 粘贴图片弹窗（全局组件，各上传位共用） ----------
+  // 打开后监听 document 的 paste 事件：Ctrl+V 粘贴剪贴板图片（截图 Win+Shift+S / PrtScn 直接粘）。
+  // multi=false 单槽——新粘覆盖旧图；multi=true 多张——连续粘贴累积。确定后把整组交给页面（含 data=base64）。
+  const PasteDlg = {
+    props: { title: { type: String, default: '粘贴图片' }, multi: { type: Boolean, default: false } },
+    template: `
+    <div class="overlay" @click.self="$emit('close')">
+      <div class="card" style="max-width:760px;width:92vw;max-height:82vh;overflow:auto">
+        <h3 style="margin:0 0 8px">{{ title }}</h3>
+        <div class="muted" style="font-size:12px;margin-bottom:10px">按 Ctrl+V 粘贴剪贴板里的图片{{ multi ? '，可连续粘贴多张' : '；再次粘贴会替换当前图' }}（截图 Win+Shift+S 后直接粘贴即可）。</div>
+        <div v-if="!items.length" style="padding:40px;text-align:center;border:1px dashed var(--border);border-radius:8px;opacity:.7">还没有粘贴图片——按 Ctrl+V 试试</div>
+        <div v-else style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px">
+          <div v-for="(it, i) in items" :key="it.key" style="position:relative;border:1px solid rgba(128,128,128,.35);border-radius:8px;padding:4px;text-align:center">
+            <img :src="it.dataUrl" style="width:100%;height:96px;object-fit:cover;border-radius:4px" />
+            <div style="font-size:11px;opacity:.65;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ it.name }}</div>
+            <button class="btn sm" style="position:absolute;top:2px;right:2px;padding:0 6px;line-height:20px" @click="rm(i)" title="移除此图">✕</button>
+            <div v-if="multi && items.length > 1" style="position:absolute;left:2px;top:2px;background:rgba(0,0,0,.6);color:#fff;font-size:11px;border-radius:4px;padding:0 5px;line-height:18px" :title="'第 ' + (i + 1) + ' 张'">{{ i + 1 }}</div>
+          </div>
+        </div>
+        <div style="margin-top:12px;display:flex;gap:10px;justify-content:flex-end;align-items:center">
+          <span class="muted" style="flex:1;font-size:12px">{{ items.length ? '共 ' + items.length + ' 张' + (multi ? '（按粘贴顺序）' : '') : '' }}</span>
+          <button v-if="items.length" class="btn sm" @click="items = []">清空</button>
+          <button class="btn sm" @click="$emit('close')">取消</button>
+          <button class="btn primary" :disabled="!items.length" @click="ok">确定（{{ items.length }} 张）</button>
+        </div>
+      </div>
+    </div>`,
+    data() { return { items: [], seq: 0 }; },
+    mounted() {
+      this._onPaste = (e) => {
+        let got = false;
+        for (const it of (e.clipboardData && e.clipboardData.items) || []) {
+          if (it.kind !== 'file' || !/^image\//.test(it.type || '')) continue;
+          const f = it.getAsFile(); if (!f) continue;
+          got = true;
+          const raw = (f.type || 'image/png').split('/')[1] || 'png';
+          const ext = ({ jpeg: 'jpg', 'svg+xml': 'svg' })[raw] || raw;
+          const seq = ++this.seq;
+          const r = new FileReader();
+          r.onload = () => {
+            const item = { key: 'p' + seq, name: f.name && f.name !== 'image.png' ? f.name : ('粘贴' + seq + '.' + ext), dataUrl: r.result, ext, data: r.result };
+            if (this.multi) { if (this.items.length < 30) this.items.push(item); }
+            else this.items = [item];   // 单槽：新粘覆盖旧图
+          };
+          r.readAsDataURL(f);
+        }
+        if (got) e.preventDefault();
+      };
+      document.addEventListener('paste', this._onPaste);
+    },
+    beforeUnmount() { document.removeEventListener('paste', this._onPaste); },
+    methods: {
+      rm(i) { this.items.splice(i, 1); },
+      ok() { this.$emit('confirm', this.items.map((x) => ({ name: x.name, dataUrl: x.dataUrl, ext: x.ext, data: x.dataUrl }))); },
+    },
+  };
+
   // ---------- 登录 ----------
   const Login = {
     template: `
@@ -287,7 +344,8 @@
               <img v-if="preview" :src="preview" class="preview-img" style="margin-top:10px;max-height:240px" />
               <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
                 <button v-if="image" class="btn sm" @click="clearStart">清除首帧</button>
-                <button class="btn sm" @click="openPick('first')" title="从文生图/广告图的历史生成图中选一张当首帧">从系统选图</button>
+                <button class="btn sm" @click="openPick('first')" title="从文生图/分层图的历史生成图中选一张当首帧">从系统选图</button>
+                <button class="btn sm" @click="openPaste('first')" title="粘贴剪贴板图片（Ctrl+V）作为首帧">粘贴图片</button>
               </div>
             </div>
             <div class="field" style="min-width:0">
@@ -296,27 +354,37 @@
               <img v-if="endPreview" :src="endPreview" class="preview-img" style="margin-top:10px;max-height:240px" />
               <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
                 <button v-if="endImage" class="btn sm" @click="clearEnd">清除尾帧</button>
-                <button class="btn sm" @click="openPick('end')" title="从文生图/广告图的历史生成图中选一张当尾帧">从系统选图</button>
+                <button class="btn sm" @click="openPick('end')" title="从文生图/分层图的历史生成图中选一张当尾帧">从系统选图</button>
+                <button class="btn sm" @click="openPaste('end')" title="粘贴剪贴板图片（Ctrl+V）作为尾帧">粘贴图片</button>
               </div>
             </div>
           </div>
           <div class="muted" style="margin-top:4px">只传首帧 = 单图生成；再传尾帧 = 自动切换首尾帧模式，清除尾帧即回到单图。</div>
-          <!-- v1.0.43 从系统选图：首帧/尾帧共用（文生图+广告图最近完成的生成图） -->
+          <!-- v1.0.43 从系统选图：首帧/尾帧共用（文生图+分层图最近完成的生成图）；需求28 批量槽位多选模式 -->
           <div v-if="pickOpen" class="overlay" @click.self="pickOpen = false">
             <div class="card" style="max-width:880px;width:94vw;max-height:82vh;overflow:auto">
-              <h3 style="margin:0 0 10px">从系统选图（{{ pickTarget === 'end' ? '作为尾帧' : '作为首帧' }}）</h3>
+              <h3 style="margin:0 0 10px">从系统选图（{{ pickMulti ? (pickTarget === 'batchEnd' ? '多选 → 批量尾帧' : '多选 → 批量首帧') : (pickTarget === 'end' ? '作为尾帧' : '作为首帧') }}）</h3>
+              <div v-if="pickMulti" class="muted" style="font-size:12px;margin-bottom:8px">点选多张、按点选顺序排队（角标数字 = 顺序），选完点右下角确定。</div>
               <div v-if="pickBusy" style="padding:24px;text-align:center;opacity:.7">加载中…</div>
               <div v-else-if="!pickList.length" style="padding:24px;text-align:center;opacity:.7">还没有已完成的生成图</div>
               <div v-else style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px">
-                <div v-for="it in pickList" :key="it.id" title="点选此图" style="cursor:pointer;border:1px solid rgba(128,128,128,.35);border-radius:8px;padding:6px;text-align:center" @click="pickOne(it)">
+                <div v-for="it in pickList" :key="it.id" :title="pickMulti ? '点选/取消此图' : '点选此图'" style="position:relative;cursor:pointer;border:1px solid rgba(128,128,128,.35);border-radius:8px;padding:6px;text-align:center" :style="pickMulti && pickSel.includes(it.id) ? { border: '2px solid var(--primary)', padding: '5px' } : undefined" @click="pickMulti ? togglePick(it) : pickOne(it)">
                   <img :src="it.url" style="width:100%;height:92px;object-fit:cover;border-radius:4px" />
                   <div style="font-size:12px;margin-top:4px">{{ it.src }} {{ it.wh }}<span v-if="it.mode"> · {{ it.mode }}</span></div>
                   <div style="font-size:11px;opacity:.6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ it.prompt || it.file }}</div>
+                  <div v-if="pickMulti && pickSel.includes(it.id)" style="position:absolute;left:2px;top:2px;background:rgba(0,0,0,.6);color:#fff;font-size:11px;border-radius:4px;padding:0 5px;line-height:18px">{{ pickSel.indexOf(it.id) + 1 }}</div>
                 </div>
               </div>
-              <div style="margin-top:12px;text-align:right"><button class="btn sm" @click="pickOpen = false">取消</button></div>
+              <div style="margin-top:12px;display:flex;gap:10px;justify-content:flex-end;align-items:center">
+                <span class="muted" style="flex:1;font-size:12px">{{ pickMulti && pickSel.length ? '已选 ' + pickSel.length + ' 张（按点选顺序）' : '' }}</span>
+                <button class="btn sm" @click="pickOpen = false">取消</button>
+                <button v-if="pickMulti" class="btn primary" :disabled="!pickSel.length || pickBusy" @click="pickMultiOk">确定（{{ pickSel.length }} 张）</button>
+              </div>
             </div>
           </div>
+
+          <!-- 需求28 粘贴图片：首帧/尾帧/批量首帧/批量尾帧共用 -->
+          <PasteDlg v-if="pasteOpen" :title="pasteTitle" :multi="pasteMulti" @confirm="onPasteConfirm" @close="pasteOpen = false" />
 
           <div style="border-top:1px dashed var(--border);margin-top:14px;padding-top:12px">
             <h3 style="margin:0 0 8px">批量生成 <span class="muted" style="font-size:13px;font-weight:normal">（用上方同一套提示词与参数，逐个排队生成，完成一个即在「最近视频」出现一个）</span></h3>
@@ -324,11 +392,19 @@
               <div class="field" style="min-width:0">
                 <label>批量首帧（可多选，按选择顺序排队）</label>
                 <input type="file" accept="image/*" multiple @change="onBatchFirst" />
+                <div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap">
+                  <button class="btn sm" @click="openPaste('batchFirst')" title="粘贴剪贴板图片（Ctrl+V，可连续多张）">粘贴图片</button>
+                  <button class="btn sm" @click="openPickMulti('batchFirst')" title="从文生图/分层图的历史生成图中多选，按点选顺序排队">从系统选图</button>
+                </div>
                 <div class="muted" style="margin-top:4px">{{ batchFirst.length ? '已选 ' + batchFirst.length + ' 张' : '未选择' }}</div>
               </div>
               <div class="field" style="min-width:0">
                 <label>批量尾帧（可选；须与首帧数量一致、按顺序一一对应）</label>
                 <input type="file" accept="image/*" multiple @change="onBatchEnd" />
+                <div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap">
+                  <button class="btn sm" @click="openPaste('batchEnd')" title="粘贴剪贴板图片（Ctrl+V，可连续多张）">粘贴图片</button>
+                  <button class="btn sm" @click="openPickMulti('batchEnd')" title="从文生图/分层图的历史生成图中多选，按点选顺序一一对应">从系统选图</button>
+                </div>
                 <div class="muted" style="margin-top:4px">{{ batchEnd.length ? '已选 ' + batchEnd.length + ' 张' : '未选择（全部按单图模式生成）' }}</div>
               </div>
             </div>
@@ -468,7 +544,8 @@
       return {
         preview: '', image: '', image_ext: 'png',
         endPreview: '', endImage: '', endImage_ext: 'png',
-        pickOpen: false, pickBusy: false, pickList: [], pickTarget: 'first', // v1.0.43 从系统选图（首帧/尾帧共用弹窗）
+        pickOpen: false, pickBusy: false, pickList: [], pickTarget: 'first', pickMulti: false, pickSel: [], // v1.0.43 从系统选图（首帧/尾帧共用弹窗）；需求28 pickMulti=批量槽位多选
+        pasteOpen: false, pasteTarget: 'first', pasteMulti: false, pasteTitle: '', // 需求28 粘贴图片（首帧/尾帧单张，批量首帧/尾帧多张）
         prompt: '', negative: '', guideText: '',
         length: 5, width: 368, height: 704, interp: 2, seed: -1, fps: 16, steps: 4,
         useSage: true, highRes: false, highResScale: 4,
@@ -633,8 +710,45 @@
       onEndFile(e) { const f = e.target.files[0]; e.target.value = ''; if (!f) return; const r = new FileReader(); r.onload = () => { this.endPreview = r.result; this.endImage = r.result; this.endImage_ext = f.name.split('.').pop(); }; r.readAsDataURL(f); },
       clearStart() { this.preview = ''; this.image = ''; },
       clearEnd() { this.endPreview = ''; this.endImage = ''; },
-      // v1.0.43 从系统选图：文生图+广告图最近完成的生成图 → 首帧/尾帧（上传功能保留不变）
-      openPick(target) { this.pickTarget = target === 'end' ? 'end' : 'first'; this.loadPick(); },
+      // v1.0.43 从系统选图：文生图+分层图最近完成的生成图 → 首帧/尾帧（上传功能保留不变）
+      openPick(target) { this.pickTarget = target === 'end' ? 'end' : 'first'; this.pickMulti = false; this.pickSel = []; this.loadPick(); },
+      // 需求28：批量槽位从系统选图（多选，按点选顺序排队）——与单选同一弹窗的另一模式
+      openPickMulti(target) { this.pickTarget = target === 'batchEnd' ? 'batchEnd' : 'batchFirst'; this.pickMulti = true; this.pickSel = []; this.loadPick(); },
+      togglePick(it) { const i = this.pickSel.indexOf(it.id); if (i >= 0) this.pickSel.splice(i, 1); else this.pickSel.push(it.id); },
+      async pickMultiOk() {
+        if (!this.pickSel.length) return;
+        this.pickBusy = true;
+        try {
+          const out = [];
+          for (const id of this.pickSel) {
+            const it = this.pickList.find((x) => x.id === id); if (!it) continue;
+            const r = await fetch(it.url);
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            const blob = await r.blob();
+            const dataUrl = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = () => rej(new Error('读取失败')); fr.readAsDataURL(blob); });
+            out.push({ name: it.file, dataUrl, ext: (it.file.split('.').pop() || 'png'), data: dataUrl });
+          }
+          if (this.pickTarget === 'batchEnd') this.batchEnd = out; else this.batchFirst = out;
+          this.syncBatchInfo();
+          this.pickOpen = false;
+        } catch (e) { alert('选图失败：' + e.message); }
+        this.pickBusy = false;
+      },
+      // 需求28 粘贴图片：单槽（首帧/尾帧）取最后一张；批量槽位整组按粘贴顺序入列
+      openPaste(target) {
+        this.pasteTarget = target;
+        this.pasteMulti = (target === 'batchFirst' || target === 'batchEnd');
+        this.pasteTitle = { first: '粘贴图片（作为首帧）', end: '粘贴图片（作为尾帧）', batchFirst: '粘贴图片（批量首帧，可多张）', batchEnd: '粘贴图片（批量尾帧，可多张）' }[target] || '粘贴图片';
+        this.pasteOpen = true;
+      },
+      onPasteConfirm(list) {
+        this.pasteOpen = false;
+        if (!list || !list.length) return;
+        if (this.pasteTarget === 'end') { const it = list[list.length - 1]; this.endPreview = it.dataUrl; this.endImage = it.dataUrl; this.endImage_ext = it.ext; }
+        else if (this.pasteTarget === 'batchFirst') { this.batchFirst = list; this.syncBatchInfo(); }
+        else if (this.pasteTarget === 'batchEnd') { this.batchEnd = list; this.syncBatchInfo(); }
+        else { const it = list[list.length - 1]; this.preview = it.dataUrl; this.image = it.dataUrl; this.image_ext = it.ext; }
+      },
       async loadPick() {
         this.pickOpen = true; this.pickBusy = true;
         try {
@@ -647,7 +761,7 @@
               if (pp.gen_mode === 'hires') mode = '重绘'; else if (pp.gen_mode === 'upscale') mode = '超分';
             } catch (e) { /* 参数解析失败照样可选 */ }
             const file = basename(j.image_path);
-            return { id: j.id, file, wh, mode, src: { ad: '广告图', h3: '文生图H3' }[j.source] || '文生图Z', url: authed('/api/image/output/' + file), prompt: String(j.prompt || '').slice(0, 40) };
+            return { id: j.id, file, wh, mode, src: { ad: '分层图', h3: '文生图H3' }[j.source] || '文生图Z', url: authed('/api/image/output/' + file), prompt: String(j.prompt || '').slice(0, 40) };
           });
         } catch (e) { alert('拉取历史图失败：' + e.message); this.pickOpen = false; }
         this.pickBusy = false;
@@ -844,7 +958,7 @@
           <div class="field"><label>负向提示词</label>
             <div style="display:flex;gap:6px;margin-bottom:6px">
               <button class="btn sm" type="button" @click="addNeg('person')" title="追加人物负面词（防双人体/畸形手/水印等）">人物负面词</button>
-              <button class="btn sm" type="button" @click="addNeg('ad')" title="追加广告图负面词（防水印/扭曲/杂乱等）">广告图负面词</button>
+              <button class="btn sm" type="button" @click="addNeg('ad')" title="追加分层图负面词（防水印/扭曲/杂乱等）">分层图负面词</button>
               <button class="btn sm" type="button" @click="clearNeg" title="清空负向提示词">清空</button>
             </div>
             <textarea v-model="p.negative" style="min-height:140px"></textarea></div>
@@ -913,10 +1027,11 @@
             </select>
           </div>
           <template v-if="p.gen_mode !== 't2i'">
-            <div class="field" style="min-width:0;flex:none;display:flex;align-items:center;gap:8px;padding-bottom:4px">
+            <div class="field" style="min-width:0;flex:none;display:flex;align-items:center;gap:8px;padding-bottom:4px;flex-wrap:wrap">
               <button class="btn sm" @click="$refs.hiresFile.click()">选择原图</button>
               <input ref="hiresFile" type="file" accept="image/*" style="display:none" @change="onHiresFile" />
               <button class="btn sm" @click="loadPick">从系统选图</button>
+              <button class="btn sm" @click="openPaste" title="粘贴剪贴板图片（Ctrl+V）作为原图">粘贴图片</button>
               <img v-if="hiresPreview" :src="hiresPreview" style="height:38px;border-radius:4px" :title="hiresName" />
               <span v-else style="font-size:12px;opacity:.7">未选择原图</span>
             </div>
@@ -944,6 +1059,9 @@
             <div style="margin-top:12px;text-align:right"><button class="btn sm" @click="pickOpen = false">取消</button></div>
           </div>
         </div>
+        <!-- 需求28 粘贴图片：重绘/超分原图（单槽，新粘覆盖） -->
+        <PasteDlg v-if="pasteOpen" title="粘贴图片（作为重绘/超分原图）" :multi="false" @confirm="onPasteConfirm" @close="pasteOpen = false" />
+
         <!-- v1.0.39 批量生成：粘贴「## 图N」分段提示词，一键提交多个文生图任务 -->
         <div v-if="batchOpen" class="overlay" @click.self="closeBatch">
           <div class="card" style="max-width:860px;width:94vw;max-height:86vh;overflow:auto">
@@ -1024,6 +1142,7 @@
       return {
         p: { prompt: '', negative: '', clip_name: '', clip_type: 'lumina2', clip_device: 'default', vae_name: '', unet_name: '', weight_dtype: 'default', width: 2560, height: 1440, batch_size: 1, shift: 3.0, seed: -1, control_after_generate: 'randomize', steps: 9, cfg: 1.0, sampler_name: 'res_multistep', scheduler: 'simple', denoise: 1.0, gen_mode: 't2i', upscale_method: 'nearest-exact' },
         hiresImage: '', hiresExt: 'png', hiresPreview: '', hiresName: '', // 重绘放大原图（文件大，不进 params）
+        pasteOpen: false, // 需求28 粘贴图片（重绘/超分原图）
         pickOpen: false, pickBusy: false, pickList: [], // 从系统选图（文生图/广告图最近完成产物）
         batchOpen: false, batchText: '', batchBusy: false, batchDone: 0, batchSep: '## 图', // v1.0.39 批量生成：粘贴「## 图N」分段提示词一键提交多任务；v1.0.40 分割关键词可改（默认 ## 图）
         ratioLock: '', ratio: 0, _syncing: false, sizePreset: '2560x1440', sizePresets: SIZE_PRESETS, // ''=不锁定；'16:9'/'4:3'=预设锁定（ratio=宽/高）
@@ -1199,6 +1318,13 @@
         }
         this._syncing = false;
       },
+      // 需求28 粘贴图片 → 重绘/超分原图（与选择原图/从系统选图同效）
+      openPaste() { this.pasteOpen = true; },
+      onPasteConfirm(list) {
+        this.pasteOpen = false;
+        const it = list && list[list.length - 1]; if (!it) return;
+        this.hiresPreview = it.dataUrl; this.hiresImage = it.dataUrl; this.hiresExt = it.ext || 'png'; this.hiresName = it.name;
+      },
       onHiresFile(e) {
         const f = e.target.files[0]; e.target.value = '';
         if (!f) return;
@@ -1219,7 +1345,7 @@
               if (pp.gen_mode === 'hires') mode = '重绘'; else if (pp.gen_mode === 'upscale') mode = '超分';
             } catch (e) { /* 参数解析失败照样可选 */ }
             const file = basename(j.image_path);
-            return { id: j.id, file, wh, mode, src: { ad: '广告图', h3: '文生图H3' }[j.source] || '文生图Z', url: authed('/api/image/output/' + file), prompt: String(j.prompt || '').slice(0, 40) };
+            return { id: j.id, file, wh, mode, src: { ad: '分层图', h3: '文生图H3' }[j.source] || '文生图Z', url: authed('/api/image/output/' + file), prompt: String(j.prompt || '').slice(0, 40) };
           });
         } catch (e) { alert('拉取历史图失败：' + e.message); this.pickOpen = false; }
         this.pickBusy = false;
@@ -1452,7 +1578,8 @@
           <button class="btn sm" @click="$refs.refFile.click()">上传图片</button>
           <input ref="refFile" type="file" accept="image/*" multiple style="display:none" @change="onRefFiles" />
           <button class="btn sm" @click="loadPick">从系统选图</button>
-          <span class="muted" style="font-size:12px">来源：本地上传 / 本系统历史生成图（文生图Z · 广告图 · 文生图H3）</span>
+          <button class="btn sm" @click="openPaste" title="粘贴剪贴板图片（Ctrl+V，可连续多张）">粘贴图片</button>
+          <span class="muted" style="font-size:12px">来源：本地上传 / 本系统历史生成图（文生图Z · 分层图 · 文生图H3）/ 剪贴板粘贴</span>
         </div>
 
         <div v-if="pickOpen" class="overlay" @click.self="pickOpen = false">
@@ -1470,6 +1597,9 @@
             <div style="margin-top:12px;text-align:right"><button class="btn sm" @click="pickOpen = false">取消</button></div>
           </div>
         </div>
+        <!-- 需求28 粘贴图片：参考图（可多张，追加进 refs，与上传/系统选图同效） -->
+        <PasteDlg v-if="pasteOpen" title="粘贴图片（参考图，可多张）" :multi="true" @confirm="onPasteConfirm" @close="pasteOpen = false" />
+
         <!-- v1.0.45 批量生成：粘贴「## 图N」分段提示词，一键提交多个 H3 任务（对齐文生图Z） -->
         <div v-if="batchOpen" class="overlay" @click.self="closeBatch">
           <div class="card" style="max-width:860px;width:94vw;max-height:86vh;overflow:auto">
@@ -1548,7 +1678,7 @@
     </div>`,
     data() {
       return {
-        p: { prompt: '', negative: '', variant: 'int8', turbo: '8', aspect_ratio: 'custom', resolution_profile: 'native detail | 0.98 MP', quality_profile: 'recommended | 5 frames', optimize_for_still: true, seed: -1, source_fidelity: 0.6, width: 1920, height: 1080, batch_size: 1, control_after_generate: 'randomize',
+        p: { prompt: '', negative: '', variant: 'int8', turbo: '8', aspect_ratio: 'custom', resolution_profile: 'native detail | 0.98 MP', quality_profile: 'single image | 1 frame (image VAE)', optimize_for_still: true, seed: -1, source_fidelity: 0.6, width: 1920, height: 1080, batch_size: 1, control_after_generate: 'randomize',
              unet_name: '', ref_unet_name: '', unet_gguf: '', clip_name: '', vae_name: '', similarity_weight: '', top_k: 4 }, // 需求25 模型与高级参数；aspect 默认 custom（宽高框常显可填）
         refs: [],            // [{ name, dataUrl, ext, data }]（data=base64，提交用；文件大不进 params）
         ratioLock: '', ratio: 0, _syncing: false, sizePreset: '', sizePresets: SIZE_PRESETS,
@@ -1556,6 +1686,7 @@
         resList: ['fast preview | 0.40 MP', 'balanced | 0.70 MP', 'high | 0.90 MP', 'native detail | 0.98 MP', 'high-res | 2.00 MP', 'ultra | 4.00 MP', 'ultra+ | 8.00 MP'],
         qualList: ['single image | 1 frame (image VAE)', 'recommended | 5 frames', 'extended quality | 9 frames', 'high quality | 13 frames', 'maximum quality | 20 frames (slow)'],
         pickOpen: false, pickBusy: false, pickList: [],
+        pasteOpen: false, // 需求28 粘贴图片（参考图多张）
         batchOpen: false, batchText: '', batchBusy: false, batchDone: 0, batchSep: '## 图', // v1.0.45 批量生成（对齐文生图Z）
         busy: false, statusText: '', job: null, timer: null, now: 0,
         queue: [], qTimer: null, stripPage: 0, stripSize: 10, qPage: 0, qPageSize: 10, pctHigh: 0,
@@ -1719,6 +1850,16 @@
         }
       },
       rmRef(i) { this.refs.splice(i, 1); },
+      // 需求28 粘贴图片：多张追加进 refs（与上传图片同效：首张=源图，共 9 张上限）
+      openPaste() { this.pasteOpen = true; },
+      onPasteConfirm(list) {
+        this.pasteOpen = false;
+        if (!list || !list.length) return;
+        for (const it of list) {
+          if (this.refs.length >= 9) { alert('最多 9 张（源图 + 8 张参考图）'); break; }
+          this.refs.push({ name: it.name, dataUrl: it.dataUrl, ext: it.ext, data: it.data });
+        }
+      },
       zoomRef(i) { openViewer([{ kind: 'image', url: this.refs[i].dataUrl, title: this.refs[i].name, sub: i === 0 ? '源图' : '参考' + (i + 1) }], 0); },
       async loadPick() {
         // 需求20：从系统选图——文生图Z/广告图/文生图H3 最近完成的产物（不带 source 过滤，普通用户只见自己的）
@@ -1729,7 +1870,7 @@
             let mode = '';
             try { mode = JSON.parse(j.params || '{}').mode === 'refedit' ? '参考编辑' : ''; } catch { }
             const file = basename(j.image_path);
-            return { id: j.id, file, mode, src: { ad: '广告图', h3: '文生图H3' }[j.source] || '文生图Z', url: authed('/api/image/output/' + file), prompt: String(j.prompt || '').slice(0, 40) };
+            return { id: j.id, file, mode, src: { ad: '分层图', h3: '文生图H3' }[j.source] || '文生图Z', url: authed('/api/image/output/' + file), prompt: String(j.prompt || '').slice(0, 40) };
           });
         } catch (e) { alert('拉取历史图失败：' + e.message); this.pickOpen = false; }
         this.pickBusy = false;
@@ -1822,12 +1963,12 @@
     },
   };
 
-  // ---------- 广告图（Qwen-Image-Layered：文生分层图 + PSD 导出，v1.0.23） ----------
+  // ---------- 分层图（需求29 更名，原「广告图」；Qwen-Image-Layered：文生分层图 + PSD 导出，v1.0.23） ----------
   const ZImageAd = {
     template: `
     <div>
       <div class="page-head" style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px">
-        <div style="min-width:0"><h2>广告图</h2><div class="desc">Qwen-Image-Layered 文生分层图：自动拆解 RGBA 透明图层 → 导出可编辑 .psd（Photoshop 打开即分层）</div></div>
+        <div style="min-width:0"><h2>分层图</h2><div class="desc">Qwen-Image-Layered 文生分层图：自动拆解 RGBA 透明图层 → 导出可编辑 .psd（Photoshop 打开即分层）</div></div>
         <div style="flex:none;display:flex;align-items:center;gap:12px">
           <div v-if="job || statusText" style="width:320px;max-width:38vw">
             <div class="progress"><div :style="{ width: showPct + '%', background: (job && job.status === 'failed') ? 'var(--danger)' : undefined }"></div></div>
@@ -1852,7 +1993,7 @@
           <div class="field"><label>负向提示词</label>
             <div style="display:flex;gap:6px;margin-bottom:6px">
               <button class="btn sm" type="button" @click="addNeg('person')" title="追加人物负面词（防双人体/畸形手/水印等）">人物负面词</button>
-              <button class="btn sm" type="button" @click="addNeg('ad')" title="追加广告图负面词（防水印/扭曲/杂乱等）">广告图负面词</button>
+              <button class="btn sm" type="button" @click="addNeg('ad')" title="追加分层图负面词（防水印/扭曲/杂乱等）">分层图负面词</button>
               <button class="btn sm" type="button" @click="clearNeg" title="清空负向提示词">清空</button>
             </div>
             <textarea v-model="p.negative" style="min-height:140px"></textarea></div>
@@ -2191,7 +2332,8 @@
             <input type="file" accept="image/*" @change="onFile($event, 'first')" />
             <img v-if="preview" :src="preview" class="preview-img" style="margin-top:10px;max-height:220px" />
             <div style="margin-top:8px">
-              <button class="btn sm" @click="openPick('first')" title="从文生图/广告图的历史生成图中选一张当首帧">从系统选图</button>
+              <button class="btn sm" @click="openPick('first')" title="从文生图/分层图的历史生成图中选一张当首帧">从系统选图</button>
+              <button class="btn sm" style="margin-left:8px" @click="openPaste('first')" title="粘贴剪贴板图片（Ctrl+V）作为首帧参考图">粘贴图片</button>
               <button v-if="image" class="btn sm" style="margin-left:8px" @click="clearStart">清除首帧</button>
             </div>
           </div>
@@ -2200,7 +2342,8 @@
             <input type="file" accept="image/*" @change="onFile($event, 'end')" />
             <img v-if="preview2" :src="preview2" class="preview-img" style="margin-top:10px;max-height:220px" />
             <div style="margin-top:8px">
-              <button class="btn sm" @click="openPick('end')" title="从文生图/广告图的历史生成图中选一张当尾帧">从系统选图</button>
+              <button class="btn sm" @click="openPick('end')" title="从文生图/分层图的历史生成图中选一张当尾帧">从系统选图</button>
+              <button class="btn sm" style="margin-left:8px" @click="openPaste('end')" title="粘贴剪贴板图片（Ctrl+V）作为尾帧参考图">粘贴图片</button>
               <button v-if="image2" class="btn sm" style="margin-left:8px" @click="clearEnd">清除尾帧</button>
             </div>
           </div>
@@ -2225,6 +2368,9 @@
           <div style="margin-top:12px;text-align:right"><button class="btn sm" @click="pickOpen = false">取消</button></div>
         </div>
       </div>
+
+      <!-- 需求28 粘贴图片：首帧/尾帧参考图 -->
+      <PasteDlg v-if="pasteOpen" :title="pasteTitle" :multi="false" @confirm="onPasteConfirm" @close="pasteOpen = false" />
 
       <!-- 需求30 批量生成：粘贴「## 图N」分段提示词，一键提交多个生视频H3 任务（对齐文生图Z/文生图H3） -->
       <div v-if="batchOpen" class="overlay" @click.self="closeBatch">
@@ -2349,6 +2495,7 @@
         preview: '', image: '', image_ext: 'png',
         preview2: '', image2: '', image2_ext: 'png', // v1.0.48 需求29：尾帧参考图（与首帧一起 = 首尾帧模式）
         pickOpen: false, pickBusy: false, pickList: [], pickTarget: 'first', // v1.0.43 从系统选图（首帧/尾帧参考图）
+        pasteOpen: false, pasteTarget: 'first', pasteTitle: '', // 需求28 粘贴图片（首帧/尾帧参考图）
         p: { prompt: '', model_name: '', clip_name: '', clip_type: 'minimax', mmproj_name: '(auto)', video_vae: '', audio_vae: '', shot_count: 1, width: 480, height: 832, frames_per_shot: 362, seed: 20260722, steps: 20, seed_per_shot: true, sampler_name: 'euler', scheduler: 'beta', self_anchor_voice: false, output_scale: 1, fps: 24, bit_depth: 'auto', color_space: 'sRGB' },
         h3Status: { running: false, url: '', device: '' },
         batchOpen: false, batchText: '', batchBusy: false, batchDone: 0, batchSep: '## 图', // 需求30 批量生成（对齐文生图Z/文生图H3）
@@ -2425,12 +2572,20 @@
               if (pp.gen_mode === 'hires') mode = '重绘'; else if (pp.gen_mode === 'upscale') mode = '超分';
             } catch (e) { /* 参数解析失败照样可选 */ }
             const file = basename(j.image_path);
-            return { id: j.id, file, wh, mode, src: { ad: '广告图', h3: '文生图H3' }[j.source] || '文生图Z', url: authed('/api/image/output/' + file), prompt: String(j.prompt || '').slice(0, 40) };
+            return { id: j.id, file, wh, mode, src: { ad: '分层图', h3: '文生图H3' }[j.source] || '文生图Z', url: authed('/api/image/output/' + file), prompt: String(j.prompt || '').slice(0, 40) };
           });
         } catch (e) { alert('拉取历史图失败：' + e.message); this.pickOpen = false; }
         this.pickBusy = false;
       },
       openPick(target) { this.pickTarget = target === 'end' ? 'end' : 'first'; this.loadPick(); },
+      // 需求28 粘贴图片：首帧/尾帧参考图（单槽，新粘覆盖）
+      openPaste(target) { this.pasteTarget = target === 'end' ? 'end' : 'first'; this.pasteTitle = target === 'end' ? '粘贴图片（作为尾帧参考图）' : '粘贴图片（作为首帧参考图）'; this.pasteOpen = true; },
+      onPasteConfirm(list) {
+        this.pasteOpen = false;
+        const it = list && list[list.length - 1]; if (!it) return;
+        if (this.pasteTarget === 'end') { this.preview2 = it.dataUrl; this.image2 = it.dataUrl; this.image2_ext = it.ext; }
+        else { this.preview = it.dataUrl; this.image = it.dataUrl; this.image_ext = it.ext; }
+      },
       async pickOne(it) {
         this.pickBusy = true;
         try {
@@ -4364,7 +4519,7 @@
         oldP: '', newP: '',
         users: [],
         allPages: [
-          { key: 'generate', label: '首尾视频' }, { key: 'zimage', label: '文生图' }, { key: 'ad', label: '广告图' },
+          { key: 'generate', label: '首尾视频' }, { key: 'zimage', label: '文生图' }, { key: 'ad', label: '分层图' },
           { key: 'h3', label: '生视频H3' }, { key: 'ha', label: '远程开机' },
           { key: 'tasks', label: '任务中心' }, { key: 'history', label: '我的历史' },
           { key: 'voice', label: '语音配音' }, { key: 'edit', label: '视频剪辑' },
@@ -5686,7 +5841,7 @@
           <button v-if="can('zimage')" class="nav-item" :class="{active: store.route==='zimage'}" @click="store.nav('zimage')"><span class="material-icons">image</span>文生图Z</button>
           <button v-if="can('zimage')" class="nav-item" :class="{active: store.route==='h3image'}" @click="store.nav('h3image')"><span class="material-icons">auto_awesome</span>文生图H3</button>
           <button v-if="can('h3')" class="nav-item" :class="{active: store.route==='h3'}" @click="store.nav('h3')"><span class="material-icons">movie</span>生视频H3</button>
-          <button v-if="can('zimage')" class="nav-item" :class="{active: store.route==='ad'}" @click="store.nav('ad')"><span class="material-icons">layers</span>广告图</button>
+          <button v-if="can('zimage')" class="nav-item" :class="{active: store.route==='ad'}" @click="store.nav('ad')"><span class="material-icons">layers</span>分层图</button>
           <button v-if="can('generate')" class="nav-item" :class="{active: store.route==='generate'}" @click="store.nav('generate')"><span class="material-icons">switch_video</span>首尾视频</button>
           <button v-if="can('edit')" class="nav-item" :class="{active: store.route==='edit'}" @click="store.nav('edit')"><span class="material-icons">content_cut</span>视频剪辑</button>
           <button v-if="can('voice')" class="nav-item" :class="{active: store.route==='voice'}" @click="store.nav('voice')"><span class="material-icons">record_voice_over</span>语音配音</button>
@@ -5786,6 +5941,7 @@
   app.component('EditStudio', EditStudio);
   app.component('Settings', Settings);
   app.component('GpuWidget', GpuWidget);
+  app.component('PasteDlg', PasteDlg);
   app.component('MediaViewer', MediaViewer);
   document.documentElement.dataset.theme = store.theme; // 启动即应用缓存主题（此前仅切换时生效）
   store.init().finally(() => app.mount('#app'));
