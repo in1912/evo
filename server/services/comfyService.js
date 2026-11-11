@@ -319,6 +319,8 @@ const DEFAULT_MODELS = [
   { key: 'zimage_unet', name: 'Z-Image UNet（turbo）', kind: 'diffusion_model', path: 'z_image_turbo_bf16.safetensors', grp: 'zimage' },
   // MiniMax-H3（视频生成）：GGUF 主模型 + qwen3vl 编码器 + 视频/音频双 VAE，跑在 8188 便携版
   { key: 'h3_model', name: 'MiniMax-H3 主模型 (GGUF)', kind: 'diffusion_model', path: 'MiniMax-H3-fl2va-curve-Q4_0.gguf', grp: 'h3' },
+  // v1.0.55 人物参考图：参考行只有 ref2va 训过（fl2va curve GGUF 无参考行）——传人物参考时自动切这件
+  { key: 'h3_ref_model', name: 'H3 人物参考模型（ref2va，参考图时自动切换）', kind: 'diffusion_model', path: 'minimax_h3_ref2va_pruned_int8_convrot.safetensors', grp: 'h3' },
   { key: 'h3_clip', name: 'H3 文本编码器', kind: 'text_encoder', path: 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors', grp: 'h3' },
   { key: 'h3_video_vae', name: 'H3 视频 VAE', kind: 'vae', path: 'minimax_h3_video_vae_fp16.safetensors', grp: 'h3' },
   { key: 'h3_audio_vae', name: 'H3 音频 VAE', kind: 'vae', path: 'minimax_h3_audio_vae_fp32.safetensors', grp: 'h3' },
@@ -1050,7 +1052,9 @@ function buildH3Workflow(p) {
   // v1.0.48 需求29：首尾帧模式 —— 官方 H3Keyframes 配方（positions 0%/100% 双锚点），
   // curve GGUF 上实测 768×448·39帧·20步 375s 出片含音频。
   // 采样按作者示例固定 res_multistep/simple（H3Keyframes 流未验证其它组合）；shot_count/multishot 参数在此模式不适用。
+  // v1.0.55：人物参考图是 H3MultishotSampler 的能力，H3Keyframes 没有参考位（路由层已拦，此处兜底报人话）
   if (p.inputName && p.endInputName) {
+    if ((p.refNames || []).length) throw new Error('首尾帧（双锚点）模式不支持人物参考图：请清除尾帧（保留首帧可以）或清空人物参考图');
     return {
       '3': { class_type: 'H3ModelLoaderAny', inputs: { model_name: p.modelName || models.h3_model || 'MiniMax-H3-fl2va-curve-Q4_0.gguf', activation_reserve_gb: 0 } },
       '4': { class_type: 'H3ClipLoaderAny', inputs: { clip_name: p.clipName || models.h3_clip || 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors', type: p.clipType || 'minimax', mmproj_name: p.mmprojName || '(auto)' } },
@@ -1076,14 +1080,26 @@ function buildH3Workflow(p) {
     };
   }
 
+  // v1.0.55 人物参考图：ref2va 的参考行 —— 传参考时模型未手动指定则自动切 ref2va（fl2va 无参考行，参考会被无视）
+  const refNames = (p.refNames || []).slice(0, 3);
+  const refMode = refNames.length > 0;
+  const REF2VA = 'minimax_h3_ref2va_pruned_int8_convrot.safetensors';
+  const modelName = refMode && !p.modelName ? (models.h3_ref_model || REF2VA) : (p.modelName || models.h3_model || 'MiniMax-H3-fl2va-curve-Q4_0.gguf');
+  // 参考图绑定句：作者文档要求在提示词里声明 <Picture N>（未手写时自动补，手写过就不重复）
+  let script = String(p.prompt || '').trim();
+  if (refMode && !/<Picture/i.test(script)) {
+    script += refNames.length === 1
+      ? '\n人物参考：<Picture 1> 是主角的参考照片，画面中主要人物的长相、发型与穿着以该照片为准。'
+      : `\n人物参考：<Picture 1> 到 <Picture ${refNames.length}> 是同一主角的参考照片，画面中主要人物的长相、发型与穿着以这些照片为准。`;
+  }
   const wf = {
-    '3': { class_type: 'H3ModelLoaderAny', inputs: { model_name: p.modelName || models.h3_model || 'MiniMax-H3-fl2va-curve-Q4_0.gguf', activation_reserve_gb: 0 } },
+    '3': { class_type: 'H3ModelLoaderAny', inputs: { model_name: modelName, activation_reserve_gb: 0 } },
     '4': { class_type: 'H3ClipLoaderAny', inputs: { clip_name: p.clipName || models.h3_clip || 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors', type: p.clipType || 'minimax', mmproj_name: p.mmprojName || '(auto)' } },
     '5': { class_type: 'VAELoader', inputs: { vae_name: p.videoVae || models.h3_video_vae || 'minimax_h3_video_vae_fp16.safetensors' } },
     '6': { class_type: 'VAELoader', inputs: { vae_name: p.audioVae || models.h3_audio_vae || 'minimax_h3_audio_vae_fp32.safetensors' } },
     '7': { class_type: 'H3MultishotSampler', inputs: {
       model: ['3', 0], clip: ['4', 0], video_vae: ['5', 0], audio_vae: ['6', 0],
-      script: String(p.prompt || '').trim(),
+      script,
       shot_count: Math.max(0, Math.min(8, Math.floor(Number(p.shotCount) || 1))),
       width: W,
       height: H,
@@ -1103,6 +1119,18 @@ function buildH3Workflow(p) {
   if (p.inputName) {
     wf['2'] = { class_type: 'LoadImage', inputs: { image: p.inputName } };
     wf['7'].inputs.start_image = ['2', 0];
+  }
+  // v1.0.55 人物参考图：1 张直连 reference_images；2-3 张 BatchImagesNode 拼 batch（0.45 槽名 image0..N-1，autogrow 前缀 image 0 起）
+  if (refMode) {
+    refNames.forEach((name, i) => { wf['2r' + (i ? i + 1 : '')] = { class_type: 'LoadImage', inputs: { image: name } }; });
+    if (refNames.length === 1) wf['7'].inputs.reference_images = ['2r', 0];
+    else {
+      // 槽名 image0..N-1 依次连 2r / 2r2 / 2r3
+      const srcIds = ['2r', '2r2', '2r3'];
+      const ins = {}; refNames.forEach((_, i) => { ins['image' + i] = [srcIds[i], 0]; });
+      wf['rb'] = { class_type: 'BatchImagesNode', inputs: ins };
+      wf['7'].inputs.reference_images = ['rb', 0];
+    }
   }
   return wf;
 }
@@ -1611,7 +1639,7 @@ async function generateQilImage({ prompt, negativePrompt, clipName, clipType, cl
 }
 
 // ---------- MiniMax-H3 图生视频 / 文生视频 生成 ----------
-async function generateH3Video({ imagePath, endImagePath, prompt, modelName, clipName, clipType, mmprojName, videoVae, audioVae, shotCount, width, height, framesPerShot, seed, steps, seedPerShot, samplerName, scheduler, selfAnchorVoice, outputScale, fps, bitDepth, colorSpace }, onProgress, taskRef) {
+async function generateH3Video({ imagePath, endImagePath, refImages, prompt, modelName, clipName, clipType, mmprojName, videoVae, audioVae, shotCount, width, height, framesPerShot, seed, steps, seedPerShot, samplerName, scheduler, selfAnchorVoice, outputScale, fps, bitDepth, colorSpace }, onProgress, taskRef) {
   const prog = (s, pct) => { if (typeof onProgress === 'function') onProgress(s, pct); };
   prog('检查 H3 后端…', 5);
   await ensureH3();
@@ -1634,9 +1662,23 @@ async function generateH3Video({ imagePath, endImagePath, prompt, modelName, cli
     prog('上传尾帧图…', 18);
     await placeInputTo(endImagePath, endInputName, base, null);
   }
+  // v1.0.55 人物参考图：最多 3 张，逐张送入 ComfyUI input（ref2va 参考行，进每个镜头的条件）
+  const refNames = [];
+  const refs = (Array.isArray(refImages) ? refImages : []).filter(Boolean).slice(0, 3);
+  if (refs.length) {
+    if (endInputName) throw new Error('首尾帧（双锚点）模式不支持人物参考图：请清除尾帧（保留首帧可以）或清空人物参考图');
+    prog(`上传人物参考图（${refs.length} 张）…`, 20);
+    for (let i = 0; i < refs.length; i++) {
+      const ext = (path.extname(refs[i]).toLowerCase() || '.png').replace('.', '');
+      const name = `h3r_${jobId}_${i}.${ext || 'png'}`;
+      await placeInputTo(refs[i], name, base, null);
+      refNames.push(name);
+    }
+    if (!modelName) prog('使用人物参考模型 ref2va（' + (models.h3_ref_model || 'minimax_h3_ref2va_pruned_int8_convrot.safetensors') + '）', 22);
+  }
 
   prog('组装工作流…', 22);
-  const wf = buildH3Workflow({ inputName, endInputName, prompt, modelName, clipName, clipType, mmprojName, videoVae, audioVae, shotCount, width, height, framesPerShot, seed, steps, seedPerShot, samplerName, scheduler, selfAnchorVoice, outputScale, fps, bitDepth, colorSpace, models, jobId });
+  const wf = buildH3Workflow({ inputName, endInputName, refNames, prompt, modelName, clipName, clipType, mmprojName, videoVae, audioVae, shotCount, width, height, framesPerShot, seed, steps, seedPerShot, samplerName, scheduler, selfAnchorVoice, outputScale, fps, bitDepth, colorSpace, models, jobId });
 
   prog('提交 ComfyUI…', 25);
   const mon = progressMonitor(base);

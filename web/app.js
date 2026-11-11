@@ -2316,7 +2316,7 @@
     template: `
     <div>
       <div class="page-head" style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px">
-        <div style="min-width:0"><h2>生视频H3</h2><div class="desc">MiniMax-H3 多镜采样：支持图生视频（首帧 / 首尾帧）/ 文生视频，统一 8189 后端</div></div>
+        <div style="min-width:0"><h2>生视频H3</h2><div class="desc">MiniMax-H3 多镜采样：图生视频（首帧 / 首尾帧）/ 文生视频 / 人物参考图（ref2va），统一 8189 后端</div></div>
         <div style="flex:none;display:flex;align-items:center;gap:12px">
           <div v-if="job || statusText" style="width:320px;max-width:38vw">
             <div class="progress"><div :style="{ width: showPct + '%', background: (job && job.status === 'failed') ? 'var(--danger)' : undefined }"></div></div>
@@ -2368,10 +2368,33 @@
           当前模式：<b>{{ image2 ? '首尾帧（首帧 → 尾帧过渡，H3Keyframes 官方配方，固定 res_multistep/simple 采样，镜头数/采样器/调度器不生效）' : '单图（图生视频）' }}</b>；只传首帧 = 单图生成，再传尾帧 = 自动切换首尾帧模式，清除尾帧即回到单图。首尾两图建议同分辨率同构图，差异过大容易过渡崩坏。
         </div>
       </div>
+
+      <!-- v1.0.55 人物参考图：ref2va 参考行，只定「这人是谁」不定构图；文生/图生视频都可用；与尾帧（首尾帧模式）互斥 -->
+      <div class="card">
+        <h3>人物参考图 <span class="muted" style="font-weight:normal;font-size:12px">（可选；最多 3 张同一人物，传了自动切 ref2va 模型并在提示词绑定 &lt;Picture N&gt;）</span></h3>
+        <div class="row" style="flex-wrap:wrap;align-items:flex-start;gap:10px">
+          <div v-for="(r, i) in refs" :key="i" style="position:relative;border:1px solid rgba(128,128,128,.35);border-radius:8px;padding:4px">
+            <img :src="r.dataUrl" style="height:96px;max-width:160px;object-fit:contain;border-radius:4px;display:block" />
+            <button class="btn sm" style="position:absolute;top:-8px;right:-8px;padding:0 7px" title="移除这张" @click="removeRef(i)">×</button>
+            <div style="font-size:11px;opacity:.65;text-align:center;margin-top:2px">第 {{ i + 1 }}/{{ refs.length }} 张</div>
+          </div>
+          <div v-if="refs.length < 3" style="display:flex;flex-direction:column;gap:8px">
+            <input type="file" accept="image/*" multiple @change="onRefFile($event)" title="选择人物照片（可多选，追加进参考位）" />
+            <div>
+              <button class="btn sm" @click="openPick('ref')" title="从文生图/分层图的历史生成图中选一张当人物参考">从系统选图</button>
+              <button class="btn sm" style="margin-left:8px" @click="openPaste('ref')" title="粘贴剪贴板图片（Ctrl+V），可连续粘贴多张追加">粘贴图片</button>
+            </div>
+          </div>
+        </div>
+        <div v-if="refs.length" style="margin-top:8px"><button class="btn sm" @click="clearRefs">清空参考（{{ refs.length }} 张）</button></div>
+        <div class="muted" style="margin-top:8px;font-size:12px">
+          参考图只决定人物长相/发型/穿着，不约束开场画面与运镜（区别于首帧）；与首帧可同时使用。参考能力是 ref2va 模型训练的：传参考会自动切 ref2va（未手动指定主模型时），不传则保持当前模型。<b>与尾帧互斥</b>：首尾帧双锚模式没有参考位，两边都设会自动清掉另一边。
+        </div>
+      </div>
       <!-- v1.0.43 从系统选图（视频生成首帧/尾帧；文生图+广告图最近完成的生成图） -->
       <div v-if="pickOpen" class="overlay" @click.self="pickOpen = false">
         <div class="card" style="max-width:880px;width:94vw;max-height:82vh;overflow:auto">
-          <h3 style="margin:0 0 10px">从系统选图（{{ pickTarget === 'end' ? '作为尾帧参考图' : '作为首帧参考图' }}）</h3>
+          <h3 style="margin:0 0 10px">从系统选图（{{ pickTitleText }}）</h3>
           <div v-if="pickBusy" style="padding:24px;text-align:center;opacity:.7">加载中…</div>
           <div v-else-if="!pickList.length" style="padding:24px;text-align:center;opacity:.7">还没有已完成的生成图</div>
           <div v-else style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px">
@@ -2385,8 +2408,8 @@
         </div>
       </div>
 
-      <!-- 需求28 粘贴图片：首帧/尾帧参考图 -->
-      <PasteDlg v-if="pasteOpen" :title="pasteTitle" :multi="false" @confirm="onPasteConfirm" @close="pasteOpen = false" />
+      <!-- 需求28 粘贴图片：首帧/尾帧参考图；v1.0.55 人物参考图可多张追加 -->
+      <PasteDlg v-if="pasteOpen" :title="pasteTitle" :multi="pasteTarget === 'ref'" @confirm="onPasteConfirm" @close="pasteOpen = false" />
 
       <!-- 需求30 批量生成：粘贴「## 图N」分段提示词，一键提交多个生视频H3 任务（对齐文生图Z/文生图H3） -->
       <div v-if="batchOpen" class="overlay" @click.self="closeBatch">
@@ -2510,6 +2533,7 @@
         mode: 'i2v',
         preview: '', image: '', image_ext: 'png',
         preview2: '', image2: '', image2_ext: 'png', // v1.0.48 需求29：尾帧参考图（与首帧一起 = 首尾帧模式）
+        refs: [], // v1.0.55 人物参考图（≤3 张 {dataUrl, ext}，ref2va 参考行；与尾帧互斥）
         pickOpen: false, pickBusy: false, pickList: [], pickTarget: 'first', // v1.0.43 从系统选图（首帧/尾帧参考图）
         pasteOpen: false, pasteTarget: 'first', pasteTitle: '', // 需求28 粘贴图片（首帧/尾帧参考图）
         p: { prompt: '', model_name: '', clip_name: '', clip_type: 'minimax', mmproj_name: '(auto)', video_vae: '', audio_vae: '', shot_count: 1, width: 480, height: 832, frames_per_shot: 362, seed: 20260722, steps: 20, seed_per_shot: true, sampler_name: 'euler', scheduler: 'beta', self_anchor_voice: false, output_scale: 1, fps: 24, bit_depth: 'auto', color_space: 'sRGB' },
@@ -2537,6 +2561,7 @@
         return out.filter((t) => { t.text = t.text.trim(); return t.text; });
       },
       stripSlice() { const s = this.stripPage * this.stripSize; return this.doneVideos.slice(s, s + this.stripSize); },
+      pickTitleText() { return { end: '作为尾帧参考图', ref: '追加为人物参考图' }[this.pickTarget] || '作为首帧参考图'; },
       // 每镜头时长提示（帧数 ÷ 帧率）；秒数框回填帧数见 secToFrames
       framesSecHint() { const f = Number(this.p.fps); return f > 0 ? (this.p.frames_per_shot / f).toFixed(1) + ' 秒' : ''; },
       jobProgressPct() {
@@ -2568,11 +2593,37 @@
         const f = e.target.files[0]; if (!f) return;
         const r = new FileReader();
         r.onload = () => {
-          if (which === 'end') { this.preview2 = r.result; this.image2 = r.result; this.image2_ext = f.name.split('.').pop(); }
+          if (which === 'end') { this.setEnd(r.result, f.name.split('.').pop()); }
           else { this.preview = r.result; this.image = r.result; this.image_ext = f.name.split('.').pop(); }
         };
         r.readAsDataURL(f);
       },
+      // v1.0.55：尾帧与人物参考图互斥（首尾帧双锚无参考位）——设尾帧清参考，加参考清尾帧，都出声提醒
+      setEnd(dataUrl, ext) {
+        this.preview2 = dataUrl; this.image2 = dataUrl; this.image2_ext = ext;
+        if (this.refs.length) { this.refs = []; alert('已自动清空人物参考图：首尾帧（双锚点）模式没有参考位。清除尾帧后可重新添加参考。'); }
+      },
+      addRefs(list) {
+        const room = 3 - this.refs.length;
+        const add = (list || []).slice(0, Math.max(0, room));
+        if (!add.length) { alert('人物参考图最多 3 张'); return; }
+        if (this.image2) { this.preview2 = ''; this.image2 = ''; alert('已自动清除尾帧：人物参考图与首尾帧（双锚点）模式互斥。需要尾帧请先清空参考。'); }
+        this.refs = this.refs.concat(add);
+      },
+      onRefFile(e) {
+        const fs = [...(e.target.files || [])]; e.target.value = '';
+        if (!fs.length) return;
+        let pending = fs.length;
+        const items = [];
+        const done = () => { if (items.length) this.addRefs(items); };
+        for (const f of fs) {
+          const r = new FileReader();
+          r.onload = () => { items.push({ dataUrl: r.result, ext: f.name.split('.').pop() }); if (--pending <= 0) done(); };
+          r.readAsDataURL(f);
+        }
+      },
+      removeRef(i) { this.refs.splice(i, 1); },
+      clearRefs() { this.refs = []; },
       clearStart() { this.preview = ''; this.image = ''; },
       clearEnd() { this.preview2 = ''; this.image2 = ''; },
       // v1.0.43 从系统选图：文生图+广告图最近完成的生成图 → 首帧参考图（上传功能保留不变）
@@ -2593,13 +2644,18 @@
         } catch (e) { alert('拉取历史图失败：' + e.message); this.pickOpen = false; }
         this.pickBusy = false;
       },
-      openPick(target) { this.pickTarget = target === 'end' ? 'end' : 'first'; this.loadPick(); },
-      // 需求28 粘贴图片：首帧/尾帧参考图（单槽，新粘覆盖）
-      openPaste(target) { this.pasteTarget = target === 'end' ? 'end' : 'first'; this.pasteTitle = target === 'end' ? '粘贴图片（作为尾帧参考图）' : '粘贴图片（作为首帧参考图）'; this.pasteOpen = true; },
+      openPick(target) { this.pickTarget = ['end', 'ref'].includes(target) ? target : 'first'; this.loadPick(); },
+      // 需求28 粘贴图片：首帧/尾帧参考图（单槽，新粘覆盖）；v1.0.55 人物参考（多张追加）
+      openPaste(target) {
+        this.pasteTarget = ['end', 'ref'].includes(target) ? target : 'first';
+        this.pasteTitle = { end: '粘贴图片（作为尾帧参考图）', ref: '粘贴图片（追加为人物参考图，可连续多张）' }[this.pasteTarget] || '粘贴图片（作为首帧参考图）';
+        this.pasteOpen = true;
+      },
       onPasteConfirm(list) {
         this.pasteOpen = false;
+        if (this.pasteTarget === 'ref') { this.addRefs((list || []).map((it) => ({ dataUrl: it.dataUrl, ext: it.ext }))); return; }
         const it = list && list[list.length - 1]; if (!it) return;
-        if (this.pasteTarget === 'end') { this.preview2 = it.dataUrl; this.image2 = it.dataUrl; this.image2_ext = it.ext; }
+        if (this.pasteTarget === 'end') { this.setEnd(it.dataUrl, it.ext); }
         else { this.preview = it.dataUrl; this.image = it.dataUrl; this.image_ext = it.ext; }
       },
       async pickOne(it) {
@@ -2609,7 +2665,8 @@
           if (!r.ok) throw new Error('HTTP ' + r.status);
           const blob = await r.blob();
           const dataUrl = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = () => rej(new Error('读取失败')); fr.readAsDataURL(blob); });
-          if (this.pickTarget === 'end') { this.preview2 = dataUrl; this.image2 = dataUrl; this.image2_ext = (it.file.split('.').pop() || 'png'); }
+          if (this.pickTarget === 'end') { this.setEnd(dataUrl, it.file.split('.').pop() || 'png'); }
+          else if (this.pickTarget === 'ref') { this.addRefs([{ dataUrl, ext: it.file.split('.').pop() || 'png' }]); }
           else { this.preview = dataUrl; this.image = dataUrl; this.image_ext = (it.file.split('.').pop() || 'png'); }
           this.pickOpen = false;
         } catch (e) { alert('选图失败：' + e.message); }
@@ -2643,6 +2700,7 @@
               prompt: it.text,
               image: this.mode === 'i2v' ? this.image : undefined, image_ext: this.image_ext,
               end_image: (this.mode === 'i2v' && this.image2) ? this.image2 : undefined, end_image_ext: this.image2_ext,
+              ref_images: this.refs.map((r) => ({ data: r.dataUrl, ext: r.ext })), // v1.0.55 批量共用当前人物参考
               model_name: this.p.model_name, clip_name: this.p.clip_name, clip_type: this.p.clip_type, mmproj_name: this.p.mmproj_name,
               video_vae: this.p.video_vae, audio_vae: this.p.audio_vae,
               shot_count: this.p.shot_count, width: this.p.width, height: this.p.height, frames_per_shot: this.p.frames_per_shot,
@@ -2680,7 +2738,8 @@
           const pr = JSON.parse(q.params || '{}');
           const w = Number(pr.width), h = Number(pr.height);
           const wh = (w > 0 && h > 0) ? w + '×' + h : '-';
-          return pr.mode === 'flf' ? wh + ' 首尾' : wh;
+          if (pr.mode === 'flf') return wh + ' 首尾';
+          return pr.ref_count ? wh + ' 人物' + pr.ref_count : wh; // v1.0.55 参考图张数标记
         } catch { return '-'; }
       },
       async refreshQueue() {
@@ -2725,6 +2784,19 @@
             this.image2 = du2; this.preview2 = du2; this.image2_ext = basename(pp.end_image_path).split('.').pop() || 'png';
           } catch (e) { if (!note) note = '（尾帧取回失败：' + e.message + '，请重新上传）'; }
         } else { this.image2 = ''; this.preview2 = ''; }
+        // v1.0.55：人物参考图一并还原（存的是上传目录路径，经 /api/generate/upload 取回）
+        this.refs = [];
+        if (Array.isArray(pp.ref_image_paths) && pp.ref_image_paths.length) {
+          for (const rp of pp.ref_image_paths.slice(0, 3)) {
+            try {
+              const r3 = await fetch(authed('/api/generate/upload/' + basename(rp)));
+              if (!r3.ok) throw new Error('HTTP ' + r3.status);
+              const blob3 = await r3.blob();
+              const du3 = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = () => rej(new Error('读取失败')); fr.readAsDataURL(blob3); });
+              this.refs.push({ dataUrl: du3, ext: basename(rp).split('.').pop() || 'png' });
+            } catch (e) { if (!note) note = '（人物参考图取回失败：' + e.message + '，请重新添加）'; }
+          }
+        }
         this.statusText = '已还原任务 #' + q.id + ' 的参数，确认后点「开始生成」' + note;
         window.scrollTo({ top: 0, behavior: 'smooth' });
       },
@@ -2738,6 +2810,8 @@
             image: this.mode === 'i2v' ? this.image : undefined, image_ext: this.image_ext,
             // v1.0.48 需求29：尾帧（仅在 i2v 且已传时发送；两张都在 = 首尾帧模式）
             end_image: (this.mode === 'i2v' && this.image2) ? this.image2 : undefined, end_image_ext: this.image2_ext,
+            // v1.0.55 人物参考图（≤3 张；与尾帧互斥由前端自动清 + 后端拦截双保险）
+            ref_images: this.refs.map((r) => ({ data: r.dataUrl, ext: r.ext })),
             model_name: this.p.model_name, clip_name: this.p.clip_name, clip_type: this.p.clip_type, mmproj_name: this.p.mmproj_name,
             video_vae: this.p.video_vae, audio_vae: this.p.audio_vae,
             shot_count: this.p.shot_count, width: this.p.width, height: this.p.height, frames_per_shot: this.p.frames_per_shot,
