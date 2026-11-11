@@ -1120,14 +1120,15 @@ function buildH3Workflow(p) {
     wf['2'] = { class_type: 'LoadImage', inputs: { image: p.inputName } };
     wf['7'].inputs.start_image = ['2', 0];
   }
-  // v1.0.55 人物参考图：1 张直连 reference_images；2-3 张 BatchImagesNode 拼 batch（0.45 槽名 image0..N-1，autogrow 前缀 image 0 起）
+  // v1.0.55 人物参考图：1 张直连 reference_images；2-3 张 BatchImagesNode 拼 batch
+  // v1.0.56 修正槽名：AUTOGROW_V3 组名 images + 前缀 image → 接线名是 "images.image0"..（写 image0 会 400 required_input_missing）
   if (refMode) {
     refNames.forEach((name, i) => { wf['2r' + (i ? i + 1 : '')] = { class_type: 'LoadImage', inputs: { image: name } }; });
     if (refNames.length === 1) wf['7'].inputs.reference_images = ['2r', 0];
     else {
-      // 槽名 image0..N-1 依次连 2r / 2r2 / 2r3
+      // 槽名 images.image0..N-1 依次连 2r / 2r2 / 2r3（实测 object_info：COMFY_AUTOGROW_V3 组 images，模板前缀 image）
       const srcIds = ['2r', '2r2', '2r3'];
-      const ins = {}; refNames.forEach((_, i) => { ins['image' + i] = [srcIds[i], 0]; });
+      const ins = {}; refNames.forEach((_, i) => { ins['images.image' + i] = [srcIds[i], 0]; });
       wf['rb'] = { class_type: 'BatchImagesNode', inputs: ins };
       wf['7'].inputs.reference_images = ['rb', 0];
     }
