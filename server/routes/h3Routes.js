@@ -92,7 +92,7 @@ router.resume = resume;
 // ---------- 生成 ----------
 router.post('/h3/generate', (req, res) => {
   const {
-    image, image_ext, prompt, model_name, clip_name, clip_type, mmproj_name, video_vae, audio_vae,
+    image, image_ext, end_image, end_image_ext, prompt, model_name, clip_name, clip_type, mmproj_name, video_vae, audio_vae,
     shot_count, width, height, frames_per_shot, seed, steps, seed_per_shot, sampler_name, scheduler,
     self_anchor_voice, output_scale, fps, bit_depth, color_space,
   } = req.body || {};
@@ -104,17 +104,21 @@ router.post('/h3/generate', (req, res) => {
   if (!String(prompt || '').trim()) return res.status(400).json({ error: '提示词不能为空' });
 
   let imagePath = '';
+  let endImagePath = '';
   try {
     if (image) imagePath = saveImage(image, image_ext);
+    // v1.0.48 需求29：尾帧（仅在有首帧时生效；两张都在 = 首尾帧模式）
+    if (end_image && imagePath) endImagePath = saveImage(end_image, end_image_ext);
   } catch (e) {
     return res.status(400).json({ error: e.message });
   }
+  const flf = !!(imagePath && endImagePath);
 
-  const params = { model_name, clip_name, clip_type, mmproj_name, video_vae, audio_vae, shot_count, width, height, frames_per_shot, seed, steps, seed_per_shot, sampler_name, scheduler, self_anchor_voice, output_scale, fps, bit_depth, color_space, mode: imagePath ? 'i2v' : 't2v' };
+  const params = { model_name, clip_name, clip_type, mmproj_name, video_vae, audio_vae, shot_count, width, height, frames_per_shot, seed, steps, seed_per_shot, sampler_name, scheduler, self_anchor_voice, output_scale, fps, bit_depth, color_space, mode: imagePath ? (flf ? 'flf' : 'i2v') : 't2v', end_image_path: endImagePath || undefined };
   const info = db.prepare('INSERT INTO h3_jobs(user_id, prompt, image_path, params, status) VALUES(?,?,?,?,?)')
     .run(req.user.id, String(prompt || ''), imagePath, JSON.stringify(params), 'pending');
   const jobId = Number(info.lastInsertRowid);
-  enqueue(jobId, { imagePath, prompt, modelName: model_name, clipName: clip_name, clipType: clip_type, mmprojName: mmproj_name, videoVae: video_vae, audioVae: audio_vae, shotCount: shot_count, width, height, framesPerShot: frames_per_shot, seed, steps, seedPerShot: seed_per_shot, samplerName: sampler_name, scheduler, selfAnchorVoice: self_anchor_voice, outputScale: output_scale, fps, bitDepth: bit_depth, colorSpace: color_space });
+  enqueue(jobId, { imagePath, endImagePath, prompt, modelName: model_name, clipName: clip_name, clipType: clip_type, mmprojName: mmproj_name, videoVae: video_vae, audioVae: audio_vae, shotCount: shot_count, width, height, framesPerShot: frames_per_shot, seed, steps, seedPerShot: seed_per_shot, samplerName: sampler_name, scheduler, selfAnchorVoice: self_anchor_voice, outputScale: output_scale, fps, bitDepth: bit_depth, colorSpace: color_space });
   res.json({ ok: true, id: jobId });
 });
 

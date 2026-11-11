@@ -2154,7 +2154,7 @@
     template: `
     <div>
       <div class="page-head" style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px">
-        <div style="min-width:0"><h2>视频生成</h2><div class="desc">MiniMax-H3 多镜采样：支持图生视频 / 文生视频，统一 8189 后端</div></div>
+        <div style="min-width:0"><h2>生视频H3</h2><div class="desc">MiniMax-H3 多镜采样：支持图生视频（首帧 / 首尾帧）/ 文生视频，统一 8189 后端</div></div>
         <div style="flex:none;display:flex;align-items:center;gap:12px">
           <div v-if="job || statusText" style="width:320px;max-width:38vw">
             <div class="progress"><div :style="{ width: showPct + '%', background: (job && job.status === 'failed') ? 'var(--danger)' : undefined }"></div></div>
@@ -2179,20 +2179,34 @@
           <label><input type="radio" value="i2v" v-model="mode" /> 图生视频（上传首帧参考图）</label>
           <label><input type="radio" value="t2v" v-model="mode" /> 文生视频（纯提示词）</label>
         </div>
-        <div v-if="mode==='i2v'" class="field" style="max-width:420px">
-          <label>首帧参考图</label>
-          <input type="file" accept="image/*" @change="onFile" />
-          <img v-if="preview" :src="preview" class="preview-img" style="margin-top:10px;max-height:220px" />
-          <div style="margin-top:8px">
-            <button class="btn sm" @click="openPick" title="从文生图/广告图的历史生成图中选一张当首帧">从系统选图</button>
-            <button v-if="image" class="btn sm" style="margin-left:8px" @click="clearStart">清除首帧</button>
+        <div v-if="mode==='i2v'" class="row" style="flex:none;align-items:flex-start;gap:24px;flex-wrap:wrap">
+          <div class="field" style="max-width:420px">
+            <label>首帧参考图 <span class="muted" style="font-weight:normal">（必传）</span></label>
+            <input type="file" accept="image/*" @change="onFile($event, 'first')" />
+            <img v-if="preview" :src="preview" class="preview-img" style="margin-top:10px;max-height:220px" />
+            <div style="margin-top:8px">
+              <button class="btn sm" @click="openPick('first')" title="从文生图/广告图的历史生成图中选一张当首帧">从系统选图</button>
+              <button v-if="image" class="btn sm" style="margin-left:8px" @click="clearStart">清除首帧</button>
+            </div>
+          </div>
+          <div class="field" style="max-width:420px">
+            <label>尾帧参考图 <span class="muted" style="font-weight:normal">（可选；与首帧一起 = 首尾帧模式）</span></label>
+            <input type="file" accept="image/*" @change="onFile($event, 'end')" />
+            <img v-if="preview2" :src="preview2" class="preview-img" style="margin-top:10px;max-height:220px" />
+            <div style="margin-top:8px">
+              <button class="btn sm" @click="openPick('end')" title="从文生图/广告图的历史生成图中选一张当尾帧">从系统选图</button>
+              <button v-if="image2" class="btn sm" style="margin-left:8px" @click="clearEnd">清除尾帧</button>
+            </div>
           </div>
         </div>
+        <div v-if="mode==='i2v'" class="muted" style="margin-top:8px">
+          当前模式：<b>{{ image2 ? '首尾帧（首帧 → 尾帧过渡，H3Keyframes 官方配方，固定 res_multistep/simple 采样，镜头数/采样器/调度器不生效）' : '单图（图生视频）' }}</b>；只传首帧 = 单图生成，再传尾帧 = 自动切换首尾帧模式，清除尾帧即回到单图。首尾两图建议同分辨率同构图，差异过大容易过渡崩坏。
+        </div>
       </div>
-      <!-- v1.0.43 从系统选图（视频生成首帧；文生图+广告图最近完成的生成图） -->
+      <!-- v1.0.43 从系统选图（视频生成首帧/尾帧；文生图+广告图最近完成的生成图） -->
       <div v-if="pickOpen" class="overlay" @click.self="pickOpen = false">
         <div class="card" style="max-width:880px;width:94vw;max-height:82vh;overflow:auto">
-          <h3 style="margin:0 0 10px">从系统选图（作为首帧参考图）</h3>
+          <h3 style="margin:0 0 10px">从系统选图（{{ pickTarget === 'end' ? '作为尾帧参考图' : '作为首帧参考图' }}）</h3>
           <div v-if="pickBusy" style="padding:24px;text-align:center;opacity:.7">加载中…</div>
           <div v-else-if="!pickList.length" style="padding:24px;text-align:center;opacity:.7">还没有已完成的生成图</div>
           <div v-else style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px">
@@ -2279,11 +2293,12 @@
         <h3>任务队列详情</h3>
         <div v-if="!queue.length" class="muted">队列为空</div>
         <table v-else class="tbl">
-          <thead><tr><th>序号</th><th>提示词</th><th>状态</th><th>过程</th><th>耗时</th><th>使用模型</th><th>结果</th></tr></thead>
+          <thead><tr><th>序号</th><th>提示词</th><th>尺寸</th><th>状态</th><th>过程</th><th>耗时</th><th>使用模型</th><th>结果</th></tr></thead>
           <tbody>
             <tr v-for="q in queue" :key="q.id">
               <td>{{ q.id }}</td>
               <td class="ellip" :title="q.prompt">{{ q.prompt || '-' }}</td>
+              <td style="white-space:nowrap">{{ whOf(q) }}</td>
               <td>{{ statusLabel(q.status) }}</td>
               <td class="ellip">{{ q.progress || '-' }}</td>
               <td class="muted">{{ fmtDur(q.duration_ms) }}</td>
@@ -2303,7 +2318,8 @@
       return {
         mode: 'i2v',
         preview: '', image: '', image_ext: 'png',
-        pickOpen: false, pickBusy: false, pickList: [], // v1.0.43 从系统选图（首帧参考图）
+        preview2: '', image2: '', image2_ext: 'png', // v1.0.48 需求29：尾帧参考图（与首帧一起 = 首尾帧模式）
+        pickOpen: false, pickBusy: false, pickList: [], pickTarget: 'first', // v1.0.43 从系统选图（首帧/尾帧参考图）
         p: { prompt: '', model_name: '', clip_name: '', clip_type: 'minimax', mmproj_name: '(auto)', video_vae: '', audio_vae: '', shot_count: 1, width: 480, height: 832, frames_per_shot: 362, seed: 20260722, steps: 20, seed_per_shot: true, sampler_name: 'euler', scheduler: 'beta', self_anchor_voice: false, output_scale: 1, fps: 24, bit_depth: 'auto', color_space: 'sRGB' },
         h3Status: { running: false, url: '', device: '' },
         busy: false, statusText: '', job: null, timer: null,
@@ -2341,8 +2357,17 @@
         try { const d = await api('GET', '/h3/defaults'); Object.assign(this.p, d); } catch (e) {}
       },
       async loadStatus() { try { this.h3Status = await api('GET', '/h3/status'); } catch (e) {} },
-      onFile(e) { const f = e.target.files[0]; if (!f) return; const r = new FileReader(); r.onload = () => { this.preview = r.result; this.image = r.result; this.image_ext = f.name.split('.').pop(); }; r.readAsDataURL(f); },
+      onFile(e, which) {
+        const f = e.target.files[0]; if (!f) return;
+        const r = new FileReader();
+        r.onload = () => {
+          if (which === 'end') { this.preview2 = r.result; this.image2 = r.result; this.image2_ext = f.name.split('.').pop(); }
+          else { this.preview = r.result; this.image = r.result; this.image_ext = f.name.split('.').pop(); }
+        };
+        r.readAsDataURL(f);
+      },
       clearStart() { this.preview = ''; this.image = ''; },
+      clearEnd() { this.preview2 = ''; this.image2 = ''; },
       // v1.0.43 从系统选图：文生图+广告图最近完成的生成图 → 首帧参考图（上传功能保留不变）
       async loadPick() {
         this.pickOpen = true; this.pickBusy = true;
@@ -2361,7 +2386,7 @@
         } catch (e) { alert('拉取历史图失败：' + e.message); this.pickOpen = false; }
         this.pickBusy = false;
       },
-      openPick() { this.loadPick(); },
+      openPick(target) { this.pickTarget = target === 'end' ? 'end' : 'first'; this.loadPick(); },
       async pickOne(it) {
         this.pickBusy = true;
         try {
@@ -2369,7 +2394,8 @@
           if (!r.ok) throw new Error('HTTP ' + r.status);
           const blob = await r.blob();
           const dataUrl = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = () => rej(new Error('读取失败')); fr.readAsDataURL(blob); });
-          this.preview = dataUrl; this.image = dataUrl; this.image_ext = (it.file.split('.').pop() || 'png');
+          if (this.pickTarget === 'end') { this.preview2 = dataUrl; this.image2 = dataUrl; this.image2_ext = (it.file.split('.').pop() || 'png'); }
+          else { this.preview = dataUrl; this.image = dataUrl; this.image_ext = (it.file.split('.').pop() || 'png'); }
           this.pickOpen = false;
         } catch (e) { alert('选图失败：' + e.message); }
         this.pickBusy = false;
@@ -2401,6 +2427,15 @@
         openViewer(items, this.doneVideos.indexOf(v));
       },
       modelOf(q) { try { const pr = JSON.parse(q.params || '{}'); return basename(pr.model_name || ''); } catch { return '-'; } },
+      // v1.0.48 需求29：队列尺寸列（宽×高；首尾帧模式加标记）
+      whOf(q) {
+        try {
+          const pr = JSON.parse(q.params || '{}');
+          const w = Number(pr.width), h = Number(pr.height);
+          const wh = (w > 0 && h > 0) ? w + '×' + h : '-';
+          return pr.mode === 'flf' ? wh + ' 首尾' : wh;
+        } catch { return '-'; }
+      },
       async refreshQueue() {
         try {
           const d = await api('GET', '/h3/queue'); this.queue = d.jobs || [];
@@ -2433,6 +2468,16 @@
             this.image = du; this.preview = du; this.image_ext = basename(q.image_path).split('.').pop() || 'png';
           } catch (e) { note = '（首帧取回失败：' + e.message + '，请重新上传）'; }
         } else { this.image = ''; this.preview = ''; }
+        // v1.0.48 需求29：首尾帧任务的尾帧也一并取回
+        if (pp.end_image_path) {
+          try {
+            const r2 = await fetch(authed('/api/generate/upload/' + basename(pp.end_image_path)));
+            if (!r2.ok) throw new Error('HTTP ' + r2.status);
+            const blob2 = await r2.blob();
+            const du2 = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = () => rej(new Error('读取失败')); fr.readAsDataURL(blob2); });
+            this.image2 = du2; this.preview2 = du2; this.image2_ext = basename(pp.end_image_path).split('.').pop() || 'png';
+          } catch (e) { if (!note) note = '（尾帧取回失败：' + e.message + '，请重新上传）'; }
+        } else { this.image2 = ''; this.preview2 = ''; }
         this.statusText = '已还原任务 #' + q.id + ' 的参数，确认后点「开始生成」' + note;
         window.scrollTo({ top: 0, behavior: 'smooth' });
       },
@@ -2444,6 +2489,8 @@
           const body = {
             prompt: this.p.prompt,
             image: this.mode === 'i2v' ? this.image : undefined, image_ext: this.image_ext,
+            // v1.0.48 需求29：尾帧（仅在 i2v 且已传时发送；两张都在 = 首尾帧模式）
+            end_image: (this.mode === 'i2v' && this.image2) ? this.image2 : undefined, end_image_ext: this.image2_ext,
             model_name: this.p.model_name, clip_name: this.p.clip_name, clip_type: this.p.clip_type, mmproj_name: this.p.mmproj_name,
             video_vae: this.p.video_vae, audio_vae: this.p.audio_vae,
             shot_count: this.p.shot_count, width: this.p.width, height: this.p.height, frames_per_shot: this.p.frames_per_shot,
@@ -2477,7 +2524,7 @@
   const MyHistory = {
     template: `
     <div>
-      <div class="page-head"><h2>我的历史</h2><div class="desc">你的全部生成记录（首尾视频 · 文生图 · 视频生成），矩阵卡片展示</div></div>
+      <div class="page-head"><h2>我的历史</h2><div class="desc">你的全部生成记录（首尾视频 · 文生图 · 生视频H3），矩阵卡片展示</div></div>
       <div v-if="!jobs.length" class="muted">还没有生成记录</div>
       <div v-else class="hist-grid">
         <div v-for="j in jobs" :key="j.type + '-' + j.id" class="hist-card">
@@ -2507,7 +2554,7 @@
     methods: {
       fmtTime,
       isVideo(j) { return j.type === 'i2v' || j.type === 'h3'; },
-      typeLabel(t) { return { i2v: '首尾视频', zimage: '文生图', h3: '视频生成' }[t] || t; },
+      typeLabel(t) { return { i2v: '首尾视频', zimage: '文生图', h3: '生视频H3' }[t] || t; },
       typeBadge(t) { return { i2v: 'dim', zimage: 'ok', h3: 'warn' }[t] || 'dim'; },
       statusLabel(s) { return { pending: '排队中', running: '生成中', done: '完成', failed: '失败' }[s] || s; },
       outPath(j) {
@@ -2525,7 +2572,7 @@
   const UserHistory = {
     template: `
     <div>
-      <div class="page-head"><h2>用户历史</h2><div class="desc">全部用户的生成历史与生成次数（首尾视频 · 文生图 · 视频生成）——点选用户查看其生成记录</div></div>
+      <div class="page-head"><h2>用户历史</h2><div class="desc">全部用户的生成历史与生成次数（首尾视频 · 文生图 · 生视频H3）——点选用户查看其生成记录</div></div>
       <div class="card"><h3>生成次数汇总（点一行 = 只看这个用户）</h3>
         <table><thead><tr><th></th><th>用户</th><th>昵称</th><th>角色</th><th>已用</th><th>额度</th><th>成功</th><th>失败</th></tr></thead>
         <tbody><tr v-for="s in summary" :key="s.id" style="cursor:pointer" :class="{sel: selUser === s.username}" @click="pickUser(s.username)">
@@ -2584,7 +2631,7 @@
     methods: {
       pickUser(u) { this.selUser = (this.selUser === u ? null : u); this.page = 0; },
       fmtTime,
-      typeLabel(t) { return { i2v: '首尾视频', zimage: '文生图', h3: '视频生成' }[t] || t; },
+      typeLabel(t) { return { i2v: '首尾视频', zimage: '文生图', h3: '生视频H3' }[t] || t; },
       typeBadge(t) { return { i2v: 'dim', zimage: 'ok', h3: 'warn' }[t] || 'dim'; },
       statusLabel(s) { return { pending: '排队中', running: '生成中', done: '完成', failed: '失败' }[s] || s; },
       outPath(j) {
@@ -4242,7 +4289,7 @@
         users: [],
         allPages: [
           { key: 'generate', label: '首尾视频' }, { key: 'zimage', label: '文生图' }, { key: 'ad', label: '广告图' },
-          { key: 'h3', label: '视频生成' }, { key: 'ha', label: '远程开机' },
+          { key: 'h3', label: '生视频H3' }, { key: 'ha', label: '远程开机' },
           { key: 'tasks', label: '任务中心' }, { key: 'history', label: '我的历史' },
           { key: 'voice', label: '语音配音' }, { key: 'edit', label: '视频剪辑' },
           { key: 'user-history', label: '用户历史' },
@@ -5562,9 +5609,9 @@
         <nav class="nav">
           <button v-if="can('zimage')" class="nav-item" :class="{active: store.route==='zimage'}" @click="store.nav('zimage')"><span class="material-icons">image</span>文生图Z</button>
           <button v-if="can('zimage')" class="nav-item" :class="{active: store.route==='h3image'}" @click="store.nav('h3image')"><span class="material-icons">auto_awesome</span>文生图H3</button>
+          <button v-if="can('h3')" class="nav-item" :class="{active: store.route==='h3'}" @click="store.nav('h3')"><span class="material-icons">movie</span>生视频H3</button>
           <button v-if="can('zimage')" class="nav-item" :class="{active: store.route==='ad'}" @click="store.nav('ad')"><span class="material-icons">layers</span>广告图</button>
           <button v-if="can('generate')" class="nav-item" :class="{active: store.route==='generate'}" @click="store.nav('generate')"><span class="material-icons">switch_video</span>首尾视频</button>
-          <button v-if="can('h3')" class="nav-item" :class="{active: store.route==='h3'}" @click="store.nav('h3')"><span class="material-icons">movie</span>视频生成</button>
           <button v-if="can('edit')" class="nav-item" :class="{active: store.route==='edit'}" @click="store.nav('edit')"><span class="material-icons">content_cut</span>视频剪辑</button>
           <button v-if="can('voice')" class="nav-item" :class="{active: store.route==='voice'}" @click="store.nav('voice')"><span class="material-icons">record_voice_over</span>语音配音</button>
           <button v-if="can('tasks')" class="nav-item" :class="{active: store.route==='tasks'}" @click="store.nav('tasks')"><span class="material-icons">fact_check</span>任务中心</button>

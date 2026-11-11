@@ -998,6 +998,40 @@ function h3Defaults() {
 // 组装 H3 工作流（API 格式）；首帧参考图缺省时走纯文生视频（不接 start_image）
 function buildH3Workflow(p) {
   const models = p.models || {};
+  const seedNum = (p.seed === undefined || p.seed === null || p.seed === '' || Number(p.seed) < 0) ? Math.floor(Math.random() * 1e15) : Number(p.seed);
+  const W = Math.max(32, Math.floor(Number(p.width) || 480));
+  const H = Math.max(32, Math.floor(Number(p.height) || 832));
+  const steps = Math.max(1, Math.min(50, Math.floor(Number(p.steps) || 20)));
+
+  // v1.0.48 需求29：首尾帧模式 —— 官方 H3Keyframes 配方（positions 0%/100% 双锚点），
+  // curve GGUF 上实测 768×448·39帧·20步 375s 出片含音频。
+  // 采样按作者示例固定 res_multistep/simple（H3Keyframes 流未验证其它组合）；shot_count/multishot 参数在此模式不适用。
+  if (p.inputName && p.endInputName) {
+    return {
+      '3': { class_type: 'H3ModelLoaderAny', inputs: { model_name: p.modelName || models.h3_model || 'MiniMax-H3-fl2va-curve-Q4_0.gguf', activation_reserve_gb: 0 } },
+      '4': { class_type: 'H3ClipLoaderAny', inputs: { clip_name: p.clipName || models.h3_clip || 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors', type: p.clipType || 'minimax', mmproj_name: p.mmprojName || '(auto)' } },
+      '5': { class_type: 'VAELoader', inputs: { vae_name: p.videoVae || models.h3_video_vae || 'minimax_h3_video_vae_fp16.safetensors' } },
+      '6': { class_type: 'VAELoader', inputs: { vae_name: p.audioVae || models.h3_audio_vae || 'minimax_h3_audio_vae_fp32.safetensors' } },
+      '2': { class_type: 'LoadImage', inputs: { image: p.inputName } },
+      '14': { class_type: 'LoadImage', inputs: { image: p.endInputName } },
+      '8k': { class_type: 'H3Keyframes', inputs: {
+        clip: ['4', 0], vae: ['5', 0], prompt: String(p.prompt || '').trim(),
+        width: Math.min(4096, W), height: Math.min(4096, H),
+        length: Math.max(5, Math.min(3600, Math.floor(Number(p.framesPerShot) || 362))),
+        positions: '0%, 100%', image_1: ['2', 0], image_2: ['14', 0],
+      } },
+      '10': { class_type: 'BasicGuider', inputs: { model: ['3', 0], conditioning: ['8k', 0] } },
+      '11': { class_type: 'KSamplerSelect', inputs: { sampler_name: 'res_multistep' } },
+      '12': { class_type: 'BasicScheduler', inputs: { model: ['3', 0], scheduler: 'simple', steps, denoise: 1.0 } },
+      '13': { class_type: 'RandomNoise', inputs: { noise_seed: seedNum } },
+      '7': { class_type: 'SamplerCustomAdvanced', inputs: { noise: ['13', 0], guider: ['10', 0], sampler: ['11', 0], sigmas: ['12', 0], latent_image: ['8k', 1] } },
+      '15': { class_type: 'VAEDecode', inputs: { samples: ['7', 0], vae: ['5', 0] } },
+      '16': { class_type: 'VAEDecodeAudio', inputs: { samples: ['7', 0], vae: ['6', 0] } },
+      '8': { class_type: 'CreateVideo', inputs: { images: ['15', 0], audio: ['16', 0], fps: Number(p.fps) || 24, bit_depth: p.bitDepth || 'auto', color_space: p.colorSpace || 'sRGB' } },
+      '9': { class_type: 'SaveVideo', inputs: { video: ['8', 0], filename_prefix: `video/H3_DANCE/h3_${p.jobId}`, format: 'auto' } },
+    };
+  }
+
   const wf = {
     '3': { class_type: 'H3ModelLoaderAny', inputs: { model_name: p.modelName || models.h3_model || 'MiniMax-H3-fl2va-curve-Q4_0.gguf', activation_reserve_gb: 0 } },
     '4': { class_type: 'H3ClipLoaderAny', inputs: { clip_name: p.clipName || models.h3_clip || 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors', type: p.clipType || 'minimax', mmproj_name: p.mmprojName || '(auto)' } },
@@ -1007,11 +1041,11 @@ function buildH3Workflow(p) {
       model: ['3', 0], clip: ['4', 0], video_vae: ['5', 0], audio_vae: ['6', 0],
       script: String(p.prompt || '').trim(),
       shot_count: Math.max(0, Math.min(8, Math.floor(Number(p.shotCount) || 1))),
-      width: Math.max(32, Math.floor(Number(p.width) || 480)),
-      height: Math.max(32, Math.floor(Number(p.height) || 832)),
+      width: W,
+      height: H,
       frames_per_shot: Math.max(5, Math.min(481, Math.floor(Number(p.framesPerShot) || 362))),
-      seed: (p.seed === undefined || p.seed === null || p.seed === '' || Number(p.seed) < 0) ? Math.floor(Math.random() * 1e15) : Number(p.seed),
-      steps: Math.max(1, Math.min(50, Math.floor(Number(p.steps) || 20))),
+      seed: seedNum,
+      steps,
       seed_per_shot: !!p.seedPerShot,
       sampler_name: p.samplerName || 'euler',
       scheduler: p.scheduler || 'beta',
@@ -1500,7 +1534,7 @@ async function generateQilImage({ prompt, negativePrompt, clipName, clipType, cl
 }
 
 // ---------- MiniMax-H3 图生视频 / 文生视频 生成 ----------
-async function generateH3Video({ imagePath, prompt, modelName, clipName, clipType, mmprojName, videoVae, audioVae, shotCount, width, height, framesPerShot, seed, steps, seedPerShot, samplerName, scheduler, selfAnchorVoice, outputScale, fps, bitDepth, colorSpace }, onProgress, taskRef) {
+async function generateH3Video({ imagePath, endImagePath, prompt, modelName, clipName, clipType, mmprojName, videoVae, audioVae, shotCount, width, height, framesPerShot, seed, steps, seedPerShot, samplerName, scheduler, selfAnchorVoice, outputScale, fps, bitDepth, colorSpace }, onProgress, taskRef) {
   const prog = (s, pct) => { if (typeof onProgress === 'function') onProgress(s, pct); };
   prog('检查 H3 后端…', 5);
   await ensureH3();
@@ -1515,9 +1549,17 @@ async function generateH3Video({ imagePath, prompt, modelName, clipName, clipTyp
     prog('上传首帧参考图…', 14);
     await placeInputTo(imagePath, inputName, base, null);
   }
+  // v1.0.48 需求29：尾帧（与首帧同时存在 = 首尾帧模式，走 H3Keyframes 官方配方）
+  let endInputName = '';
+  if (endImagePath && imagePath) {
+    const ext = (path.extname(endImagePath).toLowerCase() || '.png').replace('.', '');
+    endInputName = `h3e_${jobId}.${ext || 'png'}`;
+    prog('上传尾帧图…', 18);
+    await placeInputTo(endImagePath, endInputName, base, null);
+  }
 
   prog('组装工作流…', 22);
-  const wf = buildH3Workflow({ inputName, prompt, modelName, clipName, clipType, mmprojName, videoVae, audioVae, shotCount, width, height, framesPerShot, seed, steps, seedPerShot, samplerName, scheduler, selfAnchorVoice, outputScale, fps, bitDepth, colorSpace, models, jobId });
+  const wf = buildH3Workflow({ inputName, endInputName, prompt, modelName, clipName, clipType, mmprojName, videoVae, audioVae, shotCount, width, height, framesPerShot, seed, steps, seedPerShot, samplerName, scheduler, selfAnchorVoice, outputScale, fps, bitDepth, colorSpace, models, jobId });
 
   prog('提交 ComfyUI…', 25);
   const mon = progressMonitor(base);
@@ -1628,4 +1670,4 @@ async function adoptRun({ base, promptId, kind, jobId, extract, deadlineMin = 13
 // 从任意 base（含本机 local 模式的 8189）经 HTTP /view 下载产物——收养路径统一走 HTTP，避免依赖当前模式
 async function downloadOutput(out, dst, base) { await fetchOutputTo(out, dst, base, null); }
 
-module.exports = { ensureComfy, ensureZimage, generate, generateImage, generateH3Video, ensureH3, zimageDefaults, h3Defaults, qilDefaults, generateQilImage, buildQilWorkflow, assemblePsd, extractImages, status, statusFor, modelMap, DEFAULT_MODELS, DEFAULT_NEGATIVE, seedModels, listLoras, runHighResFix, getMode, getUrl, baseUrl, setBackend, outputDir, lanIp, getListenAddr, configureComputeNode, UPLOAD_DIR, COMFY_DIR, PYTHON, FFMPEG_DIR, WORKFLOW_FLF, WORKFLOW_ZIMAGE, activeRuns, adoptRun, downloadOutput, syncModelPaths, selfHealBackend, generateH3Image, h3iDefaults, buildH3ImageWorkflow, H3I_REQUIRED_VERSION };
+module.exports = { ensureComfy, ensureZimage, generate, generateImage, generateH3Video, buildH3Workflow, ensureH3, zimageDefaults, h3Defaults, qilDefaults, generateQilImage, buildQilWorkflow, assemblePsd, extractImages, status, statusFor, modelMap, DEFAULT_MODELS, DEFAULT_NEGATIVE, seedModels, listLoras, runHighResFix, getMode, getUrl, baseUrl, setBackend, outputDir, lanIp, getListenAddr, configureComputeNode, UPLOAD_DIR, COMFY_DIR, PYTHON, FFMPEG_DIR, WORKFLOW_FLF, WORKFLOW_ZIMAGE, activeRuns, adoptRun, downloadOutput, syncModelPaths, selfHealBackend, generateH3Image, h3iDefaults, buildH3ImageWorkflow, H3I_REQUIRED_VERSION };

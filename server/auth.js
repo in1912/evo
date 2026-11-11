@@ -56,7 +56,7 @@ const PAGES = ['generate', 'zimage', 'h3', 'history', 'user-history', 'models', 
 
 // 页面显示名（前端「用户管理 → 授权页」按此渲染全部页，逐页勾选）
 const PAGE_LABELS = {
-  generate: '首尾视频', zimage: '文生图', h3: '视频生成', history: '我的历史',
+  generate: '首尾视频', zimage: '文生图', h3: '生视频H3', history: '我的历史',
   'user-history': '用户历史', models: '模型配置', voice: '语音配音', edit: '视频剪辑',
   settings: '设置', ha: '远程开机', tasks: '任务中心',
 };
