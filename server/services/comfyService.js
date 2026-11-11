@@ -1164,11 +1164,13 @@ function h3iDefaults() {
     unet_gguf: 'MiniMax-H3-fl2va-curve-Q4_0.gguf',
     clip_name: 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors', clip_type: 'minimax',
     vae_name: 'minimax_h3_video_vae_fp16.safetensors',
-    aspect_ratio: '1:1 square',
+    aspect_ratio: 'custom',                // v1.0.47 需求26：默认自定义尺寸（宽高框常显可填；预设档仍可选）
     resolution_profile: 'native detail | 0.98 MP',
     quality_profile: 'recommended | 5 frames',
     optimize_for_still: true,
     turbo: '8',                            // '8' | '4' | 'off'（t2i 用 Turbo LoRA；参考图编辑固定 base 20 步）
+    similarity_weight: '',                 // 需求25：帧选优相似度权重（空=自动：t2i 0.6 / refedit 0.35）
+    top_k: 4,                              // 需求25：帧选优候选数
     seed: -1,
     width: 1024, height: 1024,             // v1.0.45 自定义尺寸（aspect_ratio='custom' 时生效，32 的倍数）
     batch_size: 1, control_after_generate: 'randomize', // v1.0.45 批量与种子策略（randomize/fixed/increment/decrement）
@@ -1196,9 +1198,9 @@ function buildH3ImageWorkflow(p) {
   const turbo = mode === 'refedit' ? 'off' : (p.turbo === '4' ? '4' : p.turbo === 'off' ? 'off' : '8');
   const [profile, lora] = H3I_SAMPLING[mode][turbo] || H3I_SAMPLING[mode].off;
   const unet = mode === 'refedit'
-    ? (p.refUnet || models.h3i_ref_model || 'minimax_h3_ref2va_pruned_int8_convrot.safetensors')
-    : (variant === 'gguf' ? (p.unetGguf || models.h3i_model_gguf || 'MiniMax-H3-fl2va-curve-Q4_0.gguf')
-                          : (p.unet || models.h3i_model || 'minimax_h3_fl2va_pruned_int8_convrot.safetensors'));
+    ? (p.refUnetName || p.refUnet || models.h3i_ref_model || 'minimax_h3_ref2va_pruned_int8_convrot.safetensors')
+    : (variant === 'gguf' ? (p.unetGgufName || p.unetGguf || models.h3i_model_gguf || 'MiniMax-H3-fl2va-curve-Q4_0.gguf')
+                          : (p.unetName || p.unet || models.h3i_model || 'minimax_h3_fl2va_pruned_int8_convrot.safetensors'));
   const refs = (p.refNames || []).slice(0, 9);
 
   // v1.0.45 自定义尺寸：aspectRatio='custom' 时宽高直传 prepare 节点（32 圆整、256~16384 夹取），预设节点输出不参与
@@ -1256,7 +1258,12 @@ function buildH3ImageWorkflow(p) {
     class_type: 'H3ImageFrameSelector',
     inputs: {
       frames: ['11', 0], strategy: 'decode_recommended', manual_index: 0, skip_first_frames: 0,
-      candidate_start: 0.0, candidate_end: 1.0, similarity_weight: mode === 'refedit' ? 0.35 : 0.6, top_k: 4,
+      candidate_start: 0.0, candidate_end: 1.0,
+      // 需求25：帧选优参数可调（相似度权重空=按模式自动：文生图 0.6 / 参考编辑 0.35）
+      similarity_weight: (p.similarityWeight === '' || p.similarityWeight === undefined || p.similarityWeight === null)
+        ? (mode === 'refedit' ? 0.35 : 0.6)
+        : Math.max(0, Math.min(1, Number(p.similarityWeight) || 0)),
+      top_k: Math.max(1, Math.min(20, Math.floor(Number(p.topK) || 4))),
       recommended_index: ['11', 3],
     },
   };
@@ -1267,7 +1274,7 @@ function buildH3ImageWorkflow(p) {
 }
 
 // H3-Image 生成主入口（与 generateImage 同一套提交/轮询/取回骨架）
-async function generateH3Image({ prompt, mode, variant, turbo, aspectRatio, resolutionProfile, qualityProfile, optimizeForStill, seed, sourceFidelity, refImages, width, height }, onProgress, taskRef) {
+async function generateH3Image({ prompt, mode, variant, turbo, aspectRatio, resolutionProfile, qualityProfile, optimizeForStill, seed, sourceFidelity, refImages, width, height, unetName, refUnetName, unetGgufName, clipName, vaeName, similarityWeight, topK }, onProgress, taskRef) {
   const prog = (s, pct) => { if (typeof onProgress === 'function') onProgress(s, pct); };
   const jobId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const base = baseUrl('zimage'); // 与文生图共用统一后端（本地 8189 / 远端同源切换）
@@ -1302,7 +1309,7 @@ async function generateH3Image({ prompt, mode, variant, turbo, aspectRatio, reso
   }
 
   prog('组装工作流…', 12);
-  const wf = buildH3ImageWorkflow({ mode: m, variant, turbo, prompt, aspectRatio, resolutionProfile, qualityProfile, optimizeForStill, seed, sourceFidelity, width, height, refNames, prefix: `h3i_${jobId}`, models: modelMap('h3i') });
+  const wf = buildH3ImageWorkflow({ mode: m, variant, turbo, prompt, aspectRatio, resolutionProfile, qualityProfile, optimizeForStill, seed, sourceFidelity, width, height, unetName, refUnetName, unetGgufName, clipName, vaeName, similarityWeight, topK, refNames, prefix: `h3i_${jobId}`, models: modelMap('h3i') });
 
   prog('提交 ComfyUI…', 22);
   const mon = progressMonitor(base);

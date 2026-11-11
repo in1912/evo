@@ -1407,24 +1407,40 @@
           </div>
         </div>
 
-        <div class="row" v-if="p.aspect_ratio === 'custom'" style="margin-top:12px">
-          <div class="field"><label>图像宽度（32 的倍数，自动圆整）</label><input type="number" min="256" max="16384" step="32" v-model.number="p.width" /></div>
-          <div class="field"><label>图像高度（32 的倍数，自动圆整）</label><input type="number" min="256" max="16384" step="32" v-model.number="p.height" /></div>
+        <div class="row" style="margin-top:12px">
+          <div class="field"><label>图像宽度（32 的倍数，自动圆整{{ p.aspect_ratio === 'custom' ? '' : ' · 选「自定义尺寸」后可填' }}）</label><input type="number" min="256" max="16384" step="32" v-model.number="p.width" :disabled="p.aspect_ratio !== 'custom'" /></div>
+          <div class="field"><label>图像高度（32 的倍数，自动圆整{{ p.aspect_ratio === 'custom' ? '' : ' · 选「自定义尺寸」后可填' }}）</label><input type="number" min="256" max="16384" step="32" v-model.number="p.height" :disabled="p.aspect_ratio !== 'custom'" /></div>
           <div class="field" style="min-width:0;flex:none;display:flex;align-items:flex-end;padding-bottom:4px">
-            <button class="btn sm" @click="swapSize" title="宽高互换">⇄ 互换</button>
+            <button class="btn sm" :disabled="p.aspect_ratio !== 'custom'" @click="swapSize" title="宽高互换">⇄ 互换</button>
           </div>
           <div class="field"><label>常用尺寸</label>
-            <select v-model="sizePreset" @change="applyPreset"><option value="">— 手动输入 —</option><option v-for="s in sizePresets" :key="s.v" :value="s.v">{{ s.label }}</option></select>
+            <select v-model="sizePreset" :disabled="p.aspect_ratio !== 'custom'" @change="applyPreset"><option value="">— 手动输入 —</option><option v-for="s in sizePresets" :key="s.v" :value="s.v">{{ s.label }}</option></select>
           </div>
           <div class="field"><label>锁定比例</label>
-            <select v-model="ratioLock" @change="onRatioLock">
+            <select v-model="ratioLock" :disabled="p.aspect_ratio !== 'custom'" @change="onRatioLock">
               <option value="">不锁定</option>
               <option value="16:9">16:9</option>
               <option value="4:3">4:3</option>
             </select>
           </div>
-          <div class="muted" style="align-self:center;font-size:12px;flex:1;min-width:200px">范围 256~16384；与文生图Z 相同的尺寸机制（预设 / 锁比 / 互换），H3 侧提交时按 32 圆整。</div>
+          <div class="muted" style="align-self:center;font-size:12px;flex:1;min-width:200px">范围 256~16384，提交时按 32 圆整；画面比例选预设档（1:1、16:9…）时由官方节点按分辨率档位算尺寸，宽高框置灰。</div>
         </div>
+
+        <details style="margin:14px 0 0" v-if="true">
+          <summary style="cursor:pointer;font-weight:600;font-size:13px">模型与高级参数（ComfyUI 装载器，一般无需改动）</summary>
+          <div class="row" style="margin-top:10px">
+            <div class="field"><label>主模型（int8_convrot · unet_name）</label><input v-model="p.unet_name" /></div>
+            <div class="field"><label>参考图模型（ref2va int8 · ref_unet_name）</label><input v-model="p.ref_unet_name" /></div>
+            <div class="field"><label>GGUF 模型（预留 · unet_gguf）</label><input v-model="p.unet_gguf" /></div>
+          </div>
+          <div class="row">
+            <div class="field"><label>文本编码器（CLIP · clip_name）</label><input v-model="p.clip_name" /></div>
+            <div class="field"><label>VAE 模型（vae_name）</label><input v-model="p.vae_name" /></div>
+            <div class="field" style="min-width:180px"><label>帧选优相似度权重（留空=自动：文生图 0.6 / 参考编辑 0.35）</label><input v-model="p.similarity_weight" placeholder="留空=自动" /></div>
+            <div class="field" style="max-width:140px"><label>帧选优 top_k</label><input type="number" min="1" max="20" v-model.number="p.top_k" /></div>
+          </div>
+          <div class="muted" style="font-size:12px;margin-top:6px">采样说明：H3 的「采样器」= 采样档位配方（Turbo LoRA 与步数成对，官方明确警告不可混搭），ComfyUI 侧无自由 steps/CFG/scheduler 输入框；当前配方 LoRA：{{ turboLora }}。</div>
+        </details>
 
         <h3 style="margin:18px 0 8px">参考图 <span class="muted" style="font-weight:400;font-size:12px">（第一张=源图，最多再选 8 张=参考图 2..9；不选 = 纯文生图）</span></h3>
         <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
@@ -1532,7 +1548,8 @@
     </div>`,
     data() {
       return {
-        p: { prompt: '', negative: '', variant: 'int8', turbo: '8', aspect_ratio: '1:1 square', resolution_profile: 'native detail | 0.98 MP', quality_profile: 'recommended | 5 frames', optimize_for_still: true, seed: -1, source_fidelity: 0.6, width: 1024, height: 1024, batch_size: 1, control_after_generate: 'randomize' },
+        p: { prompt: '', negative: '', variant: 'int8', turbo: '8', aspect_ratio: 'custom', resolution_profile: 'native detail | 0.98 MP', quality_profile: 'recommended | 5 frames', optimize_for_still: true, seed: -1, source_fidelity: 0.6, width: 1024, height: 1024, batch_size: 1, control_after_generate: 'randomize',
+             unet_name: '', ref_unet_name: '', unet_gguf: '', clip_name: '', vae_name: '', similarity_weight: '', top_k: 4 }, // 需求25 模型与高级参数；aspect 默认 custom（宽高框常显可填）
         refs: [],            // [{ name, dataUrl, ext, data }]（data=base64，提交用；文件大不进 params）
         ratioLock: '', ratio: 0, _syncing: false, sizePreset: '', sizePresets: SIZE_PRESETS,
         aspectList: ['1:1 square', '4:5 portrait', '3:4 portrait', '2:3 portrait', '9:16 portrait', '16:9 landscape', '3:2 landscape', '4:3 landscape', '21:9 ultrawide'],
@@ -1580,6 +1597,10 @@
         if (!this.busy || !this._t0) return '';
         const s = Math.max(0, Math.floor(((this.now || Date.now()) - this._t0) / 1000));
         return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+      },
+      turboLora() {
+        if (this.refs.length) return '参考图编辑固定 base 20 步（无 LoRA）';
+        return { 8: 'minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16', 4: 'minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16', off: 'base 20 步（无 LoRA）' }[this.p.turbo] || '-';
       },
     },
     async mounted() {
@@ -1638,6 +1659,10 @@
               optimize_for_still: this.p.optimize_for_still, seed: this.p.seed, source_fidelity: this.p.source_fidelity,
               batch_size: 1, control_after_generate: this.p.control_after_generate || 'randomize',
               ...(this.p.aspect_ratio === 'custom' ? { width: Math.round(Number(this.p.width) || 1024), height: Math.round(Number(this.p.height) || 1024) } : {}),
+              unet_name: this.p.unet_name, ref_unet_name: this.p.ref_unet_name, unet_gguf: this.p.unet_gguf,
+              clip_name: this.p.clip_name, vae_name: this.p.vae_name,
+              similarity_weight: String(this.p.similarity_weight ?? '').trim() === '' ? '' : Number(this.p.similarity_weight),
+              top_k: Math.max(1, Math.min(20, Math.floor(Number(this.p.top_k) || 4))),
               images: this.refs.map((r) => ({ data: r.data, ext: r.ext })),
             };
             await api('POST', '/image/generate', body);
@@ -1674,7 +1699,7 @@
           const d = await api('GET', '/image/h3-defaults');
           if (d.prompt && !this.p.prompt) this.p.prompt = d.prompt;
           if (d.negative && !this.p.negative) this.p.negative = d.negative; // 需求23 预置负面词
-          for (const k of ['variant', 'turbo', 'aspect_ratio', 'resolution_profile', 'quality_profile', 'source_fidelity', 'batch_size', 'control_after_generate', 'width', 'height']) if (d[k] !== undefined) this.p[k] = d[k];
+          for (const k of ['variant', 'turbo', 'aspect_ratio', 'resolution_profile', 'quality_profile', 'source_fidelity', 'batch_size', 'control_after_generate', 'width', 'height', 'unet_name', 'ref_unet_name', 'unet_gguf', 'clip_name', 'vae_name', 'top_k']) if (d[k] !== undefined) this.p[k] = d[k];
           if (d.optimize_for_still !== undefined) this.p.optimize_for_still = !!d.optimize_for_still;
         } catch (e) { /* 后端不可达时保留默认值 */ }
       },
@@ -1760,6 +1785,10 @@
             batch_size: Math.max(1, Math.min(8, Number(this.p.batch_size) || 1)),
             control_after_generate: this.p.control_after_generate || 'randomize',
             ...(this.p.aspect_ratio === 'custom' ? { width: Math.round(Number(this.p.width) || 1024), height: Math.round(Number(this.p.height) || 1024) } : {}),
+            unet_name: this.p.unet_name, ref_unet_name: this.p.ref_unet_name, unet_gguf: this.p.unet_gguf,
+            clip_name: this.p.clip_name, vae_name: this.p.vae_name,
+            similarity_weight: String(this.p.similarity_weight ?? '').trim() === '' ? '' : Number(this.p.similarity_weight),
+            top_k: Math.max(1, Math.min(20, Math.floor(Number(this.p.top_k) || 4))),
             images: this.refs.map((r) => ({ data: r.data, ext: r.ext })),
           };
           const _busy = await busyBefore();
@@ -2496,17 +2525,40 @@
   const UserHistory = {
     template: `
     <div>
-      <div class="page-head"><h2>用户历史</h2><div class="desc">全部用户的生成历史与生成次数（首尾视频 · 文生图 · 视频生成）</div></div>
-      <div class="card"><h3>生成次数汇总</h3>
-        <table><thead><tr><th>用户</th><th>昵称</th><th>角色</th><th>已用</th><th>额度</th><th>成功</th><th>失败</th></tr></thead>
-        <tbody><tr v-for="s in summary" :key="s.id"><td>{{ s.username }}</td><td>{{ s.display_name }}</td><td>{{ s.role }}</td><td>{{ s.used }}</td><td>{{ s.quota < 0 ? '不限' : s.quota }}</td><td>{{ s.done }}</td><td>{{ s.failed }}</td></tr></tbody></table>
+      <div class="page-head"><h2>用户历史</h2><div class="desc">全部用户的生成历史与生成次数（首尾视频 · 文生图 · 视频生成）——点选用户查看其生成记录</div></div>
+      <div class="card"><h3>生成次数汇总（点一行 = 只看这个用户）</h3>
+        <table><thead><tr><th></th><th>用户</th><th>昵称</th><th>角色</th><th>已用</th><th>额度</th><th>成功</th><th>失败</th></tr></thead>
+        <tbody><tr v-for="s in summary" :key="s.id" style="cursor:pointer" :class="{sel: selUser === s.username}" @click="pickUser(s.username)">
+          <td>{{ selUser === s.username ? '✓' : '' }}</td>
+          <td>{{ s.username }}</td>
+          <td>{{ s.display_name }}</td>
+          <td>{{ s.role }}</td>
+          <td>{{ s.used }}</td>
+          <td>{{ s.quota < 0 ? '不限' : s.quota }}</td>
+          <td>{{ s.done }}</td>
+          <td>{{ s.failed }}</td>
+        </tr></tbody></table>
       </div>
-      <div class="card"><h3>全部生成记录</h3>
-        <table><thead><tr><th>#</th><th>类型</th><th>用户</th><th>提示词</th><th>状态</th><th>时间</th><th>结果</th><th></th></tr></thead>
-        <tbody><tr v-for="j in jobs" :key="j.type + '-' + j.id">
+      <div class="card">
+        <div class="row" style="flex:none;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px">
+          <h3 style="margin:0">{{ selUser ? '「' + selUser + '」的生成记录' : '生成记录（未选用户）' }}</h3>
+          <div v-if="selUser && filteredJobs.length" class="pager" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <button class="btn sm" :disabled="page === 0" @click="page--">‹ 上一页</button>
+            <span class="muted">第 {{ page + 1 }} / {{ totalPages }} 页 · 共 {{ filteredJobs.length }} 条</span>
+            <button class="btn sm" :disabled="page >= totalPages - 1" @click="page++">下一页 ›</button>
+            <select v-model.number="pageSize" @change="page = 0" style="width:auto">
+              <option v-for="n in [10, 20, 30, 50]" :key="n" :value="n">{{ n }} 条/页</option>
+            </select>
+          </div>
+        </div>
+        <div v-if="!selUser" class="muted" style="padding:18px 4px">👆 点选上方汇总表里的一个用户，这里就只显示 TA 生成过的任务记录。</div>
+        <template v-else>
+        <div v-if="!filteredJobs.length" class="muted" style="padding:18px 4px">该用户暂无生成记录。</div>
+        <table v-else><thead><tr><th>#</th><th>类型</th><th>用户</th><th>提示词</th><th>状态</th><th>时间</th><th>结果</th><th></th></tr></thead>
+        <tbody><tr v-for="j in pageJobs" :key="j.type + '-' + j.id">
           <td>{{ j.id }}</td>
           <td><span class="badge" :class="typeBadge(j.type)">{{ typeLabel(j.type) }}</span></td>
-          <td>{{ j.username }}</td>
+          <td>{{ j.display_name || j.username }}</td>
           <td style="max-width:260px" class="ellip" :title="j.prompt">{{ j.prompt || '-' }}</td>
           <td><span class="badge" :class="j.status==='done'?'ok':(j.status==='failed'?'err':'warn')">{{ statusLabel(j.status) }}</span></td>
           <td class="muted">{{ fmtTime(j.created_at) }}</td>
@@ -2516,11 +2568,21 @@
           </td>
           <td><button class="btn sm danger" @click="del(j)">删除</button></td>
         </tr></tbody></table>
+        </template>
       </div>
     </div>`,
-    data() { return { summary: [], jobs: [] }; },
+    data() { return { summary: [], jobs: [], selUser: null, page: 0, pageSize: 10 }; },
     async mounted() { const [a, b] = await Promise.all([api('GET', '/user-history/summary'), api('GET', '/user-history')]); this.summary = a.summary; this.jobs = b.jobs; },
+    computed: {
+      filteredJobs() { return this.selUser ? this.jobs.filter((j) => j.username === this.selUser) : []; },
+      totalPages() { return Math.max(1, Math.ceil(this.filteredJobs.length / this.pageSize)); },
+      pageJobs() {
+        if (this.page > this.totalPages - 1) this.page = this.totalPages - 1;
+        return this.filteredJobs.slice(this.page * this.pageSize, (this.page + 1) * this.pageSize);
+      },
+    },
     methods: {
+      pickUser(u) { this.selUser = (this.selUser === u ? null : u); this.page = 0; },
       fmtTime,
       typeLabel(t) { return { i2v: '首尾视频', zimage: '文生图', h3: '视频生成' }[t] || t; },
       typeBadge(t) { return { i2v: 'dim', zimage: 'ok', h3: 'warn' }[t] || 'dim'; },

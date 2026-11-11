@@ -1,6 +1,6 @@
 {
   "name": "evolveshot",
-  "version": "1.0.46",
+  "version": "1.0.47",
   "description": "衍像｜EvolveShot — 图生视频 + 语音克隆配音系统（自包含）",
   "main": "server/index.js",
   "scripts": {

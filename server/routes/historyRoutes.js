@@ -87,11 +87,14 @@ router.get('/user-history', requireAdmin, (req, res) => {
   const names = new Map(db.prepare('SELECT id, username, display_name FROM users').all().map((u) => [u.id, u]));
   for (const j of jobs) {
     const u = names.get(j.user_id);
-    j.username = u ? (u.display_name || u.username) : '';
+    // v1.0.47 需求28：username 必须和 /user-history/summary 的 username 一致（登录名），前端按它过滤；
+    // 昵称单独给 display_name，表格里优先显示昵称。
+    j.username = u ? u.username : '';
+    j.display_name = u ? (u.display_name || u.username) : '';
   }
   if (uid) {
     const u = names.get(uid);
-    res.json({ jobs, username: u ? (u.display_name || u.username) : '' });
+    res.json({ jobs, username: u ? u.username : '', display_name: u ? (u.display_name || u.username) : '' });
   } else {
     res.json({ jobs });
   }

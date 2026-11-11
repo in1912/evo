@@ -564,3 +564,7 @@ video, .preview-img { max-width: 100%; border-radius: 8px; border: 1px solid var
 .tile-del { position: absolute; right: 3px; bottom: 3px; width: 18px; height: 18px; padding: 0; border: none; border-radius: 50%; background: rgba(0,0,0,.55); color: #fff; font-size: 11px; line-height: 1; cursor: pointer; opacity: 0; transition: opacity .12s; display: flex; align-items: center; justify-content: center; }
 .st-thumb-tile:hover .tile-del { opacity: 1; }
 .tile-del:hover { background: var(--danger); }
+
+/* 用户历史（v1.0.47 需求28）：点选用户行高亮 */
+#app table tbody tr[style*="cursor:pointer"]:hover { background: var(--bg-hover); }
+#app table tbody tr.sel { background: var(--bg-hover); outline: 1px solid var(--border); }

@@ -120,6 +120,8 @@ router.post('/image/generate', (req, res) => {
     variant, turbo, aspect_ratio, resolution_profile, quality_profile, optimize_for_still, source_fidelity, images,
     // v1.0.45 文生图H3 参数对齐：control_after_generate 种子策略（width/height/batch_size 与文生图共用上方解构）
     control_after_generate,
+    // v1.0.47 需求25：模型装载器与帧选优参数透传（空串=用默认）
+    ref_unet_name, unet_gguf, similarity_weight, top_k,
   } = req.body || {};
 
   // v1.0.45：文生图H3 批量=N 条队列任务（逐条种子），配额按条数核
@@ -175,8 +177,13 @@ router.post('/image/generate', (req, res) => {
       return Math.max(-1, h3Base + (h3Ctrl === 'increment' ? i : -i));
     };
     h3Batch = { n: h3BatchN, ctrl: h3Ctrl, base: h3Base, isCustom, cw, ch, seedFor };
-    params = { mode: h3Mode, variant: variant === 'gguf' || variant === 'ph3' ? variant : 'int8', turbo: ['4', '8', 'off'].includes(turbo) ? turbo : '8', aspect_ratio, resolution_profile, quality_profile, optimize_for_still: !!optimize_for_still, source_fidelity: Number(source_fidelity) || 0.6, seed, gen_mode: 't2i', batch_size: h3BatchN, control_after_generate: h3Ctrl, ...(isCustom ? { width: cw, height: ch } : {}) };
-    opts = { prompt, mode: h3Mode, variant: params.variant, turbo: params.turbo, aspectRatio: aspect_ratio, resolutionProfile: resolution_profile, qualityProfile: quality_profile, optimizeForStill: !!optimize_for_still, sourceFidelity: Number(source_fidelity) || 0.6, seed, refImages: h3RefPaths, source: 'h3', ...(isCustom ? { width: cw, height: ch } : {}) };
+    // v1.0.47 需求25：模型五件套 + 帧选优参数（空=默认；相似度权重空串走 builder 自动值）
+    const simW = String(similarity_weight ?? '').trim() === '' ? '' : Math.max(0, Math.min(1, Number(similarity_weight) || 0));
+    const tk = Math.max(1, Math.min(20, Math.floor(Number(top_k) || 4)));
+    params = { mode: h3Mode, variant: variant === 'gguf' || variant === 'ph3' ? variant : 'int8', turbo: ['4', '8', 'off'].includes(turbo) ? turbo : '8', aspect_ratio, resolution_profile, quality_profile, optimize_for_still: !!optimize_for_still, source_fidelity: Number(source_fidelity) || 0.6, seed, gen_mode: 't2i', batch_size: h3BatchN, control_after_generate: h3Ctrl, ref_unet_name: ref_unet_name || '', unet_gguf: unet_gguf || '', similarity_weight: simW, top_k: tk, ...(clip_name ? { clip_name } : {}), ...(vae_name ? { vae_name } : {}), ...(unet_name ? { unet_name } : {}), ...(isCustom ? { width: cw, height: ch } : {}) };
+    opts = { prompt, mode: h3Mode, variant: params.variant, turbo: params.turbo, aspectRatio: aspect_ratio, resolutionProfile: resolution_profile, qualityProfile: quality_profile, optimizeForStill: !!optimize_for_still, sourceFidelity: Number(source_fidelity) || 0.6, seed, refImages: h3RefPaths, source: 'h3',
+      unetName: unet_name || '', refUnetName: ref_unet_name || '', unetGgufName: unet_gguf || '', clipName: clip_name || '', vaeName: vae_name || '',
+      similarityWeight: simW, topK: tk, ...(isCustom ? { width: cw, height: ch } : {}) };
   } else {
     params = { clip_name, clip_type, clip_device, vae_name, unet_name, weight_dtype, width, height, batch_size, shift, seed, steps, cfg, sampler_name, scheduler, denoise, layered: !!layered, layers: Math.max(2, Math.min(8, Math.floor(Number(layers) || 3))), gen_mode: genMode, upscale_method: upMethod };
     opts = { prompt, negativePrompt: negative_prompt, clipName: clip_name, clipType: clip_type, clipDevice: clip_device, vaeName: vae_name, unetName: unet_name, weightDtype: weight_dtype, width, height, batchSize: batch_size, shift, seed, steps, cfg, samplerName: sampler_name, scheduler, denoise, layered: !!layered, layers: Math.max(2, Math.min(8, Math.floor(Number(layers) || 3))), genMode, srcImagePath, upscaleMethod: upMethod, source: src };
