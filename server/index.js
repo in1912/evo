@@ -16,6 +16,7 @@ const APP_ROOT = path.join(__dirname, '..');
 const WEB_DIR = path.join(APP_ROOT, 'web');
 const PORT = Number(process.env.PORT || 9666);
 const SYSTEM_NAME = '衍像｜EvolveShot';
+const PKG_VERSION = require(path.join(APP_ROOT, 'package.json')).version; // v1.0.45 提前：静态段就要用（health 同源）
 
 const app = express();
 app.disable('x-powered-by');
@@ -31,13 +32,23 @@ app.use((req, res, next) => {
 });
 
 // ---------- ② 静态资源（无需登录：登录页 + 前端资源） ----------
-app.use(express.static(WEB_DIR, { index: 'index.html', maxAge: 0 }));
+// v1.0.45 修复「升级后页面版本弹窗反复弹」：index.html 里 app.js 的 ?v= 不再靠手改（1.0.44
+// 部署后仍是 ?v=1.0.43 → 页面守卫比对 health 1.0.44 永远不一致，刷新一次弹一次）。
+// 这里改为请求时按 package.json 版本动态注入，并给 index.html 加 no-cache（app.js 本体仍走 ETag）。
+const sendIndex = (req, res) => {
+  fs.readFile(path.join(WEB_DIR, 'index.html'), 'utf8', (e, html) => {
+    if (e) return res.status(500).send('index.html missing');
+    res.set('Cache-Control', 'no-cache');
+    res.send(html.replace(/app\.js\?v=[0-9.A-Za-z-]*/, 'app.js?v=' + PKG_VERSION));
+  });
+};
+app.get(['/', '/index.html'], sendIndex);
+app.use(express.static(WEB_DIR, { index: false, maxAge: 0 }));
 
 // ---------- ③ JSON 解析（base64 图像/音频较大） ----------
 app.use(express.json({ limit: '80mb' }));
 
 // ---------- ③b 公开系统信息（无需登录） ----------
-const PKG_VERSION = require('../package.json').version; // 跟随 package.json（升级后重启即正确显示）
 app.get('/api/health', (req, res) => res.json({ ok: true, name: SYSTEM_NAME, version: PKG_VERSION }));
 app.get('/api/system', (req, res) => res.json({ name: SYSTEM_NAME, version: PKG_VERSION }));
 app.use('/api', require('./routes/systemRoutes').publicRouter); // GPU 采样公开（算力端实例间中继用）
@@ -93,7 +104,7 @@ app.use('/api', require('./routes/systemRoutes').authedRouter);
 // ---------- ⑦ SPA 兜底 ----------
 app.use((req, res, next) => {
   if (req.method !== 'GET' || req.path.startsWith('/api/')) return next();
-  res.sendFile(path.join(WEB_DIR, 'index.html'));
+  sendIndex(req, res); // v1.0.45：深链兜底同样注入当前版本号
 });
 
 // ---------- 启动 ----------

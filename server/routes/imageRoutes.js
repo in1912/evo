@@ -118,11 +118,15 @@ router.post('/image/generate', (req, res) => {
     layered, layers, source, gen_mode, upscale_method, image,
     // v1.0.44 文生图H3（source='h3'）：变体/采样/预设 + 参考图数组（第一张=源图，其余=参考图2..9）
     variant, turbo, aspect_ratio, resolution_profile, quality_profile, optimize_for_still, source_fidelity, images,
+    // v1.0.45 文生图H3 参数对齐：control_after_generate 种子策略（width/height/batch_size 与文生图共用上方解构）
+    control_after_generate,
   } = req.body || {};
 
+  // v1.0.45：文生图H3 批量=N 条队列任务（逐条种子），配额按条数核
+  const h3BatchN = source === 'h3' ? Math.max(1, Math.min(8, Math.floor(Number(batch_size) || 1))) : 1;
   if (req.user.quota >= 0) {
     const used = db.prepare('SELECT COUNT(*) c FROM img_jobs WHERE user_id=?').get(req.user.id).c;
-    if (used >= req.user.quota) return res.status(403).json({ error: `生成次数已达上限（${req.user.quota} 次）` });
+    if (used + h3BatchN > req.user.quota) return res.status(403).json({ error: `生成次数将达上限（已用 ${used}/${req.user.quota}，本次需 ${h3BatchN} 条）` });
   }
   // v1.0.36 生成模式：t2i=文生图 / hires=重绘放大(img2img) / upscale=纯超分(RealESRGAN，不重绘)
   const genMode = ['hires', 'upscale'].includes(gen_mode) ? gen_mode : 't2i';
@@ -155,17 +159,45 @@ router.post('/image/generate', (req, res) => {
     }
   }
 
-  let params, opts;
+  let params, opts, h3Batch = null;
   if (src === 'h3') {
     const h3Mode = h3RefPaths.length ? 'refedit' : 't2i';
-    params = { mode: h3Mode, variant: variant === 'gguf' || variant === 'ph3' ? variant : 'int8', turbo: ['4', '8', 'off'].includes(turbo) ? turbo : '8', aspect_ratio, resolution_profile, quality_profile, optimize_for_still: !!optimize_for_still, source_fidelity: Number(source_fidelity) || 0.6, seed, gen_mode: 't2i' };
-    opts = { prompt, mode: h3Mode, variant: params.variant, turbo: params.turbo, aspectRatio: aspect_ratio, resolutionProfile: resolution_profile, qualityProfile: quality_profile, optimizeForStill: !!optimize_for_still, sourceFidelity: Number(source_fidelity) || 0.6, seed, refImages: h3RefPaths, source: 'h3' };
+    // v1.0.45 自定义尺寸：aspect_ratio='custom' 时宽高直传（32 圆整、256~16384 夹取），预设档位不参与
+    const isCustom = aspect_ratio === 'custom';
+    const snap32 = (n, dft) => { const v = Math.round(Number(n) || dft); return Math.max(256, Math.min(16384, Math.round(v / 32) * 32)); };
+    const cw = isCustom ? snap32(width, 1024) : 0, ch = isCustom ? snap32(height, 1024) : 0;
+    // v1.0.45 种子策略（同文生图Z 的 control_after_generate 语义，作用于批量逐条）：随机=每条 -1；固定=同种子；递增/递减=逐条 ±i
+    const h3Ctrl = ['fixed', 'increment', 'decrement'].includes(control_after_generate) ? control_after_generate : 'randomize';
+    const h3Base = Number.isFinite(Math.floor(Number(seed))) ? Math.floor(Number(seed)) : -1;
+    const seedFor = (i) => {
+      if (h3Ctrl === 'randomize' || h3Base < 0) return -1;
+      if (h3Ctrl === 'fixed') return h3Base;
+      return Math.max(-1, h3Base + (h3Ctrl === 'increment' ? i : -i));
+    };
+    h3Batch = { n: h3BatchN, ctrl: h3Ctrl, base: h3Base, isCustom, cw, ch, seedFor };
+    params = { mode: h3Mode, variant: variant === 'gguf' || variant === 'ph3' ? variant : 'int8', turbo: ['4', '8', 'off'].includes(turbo) ? turbo : '8', aspect_ratio, resolution_profile, quality_profile, optimize_for_still: !!optimize_for_still, source_fidelity: Number(source_fidelity) || 0.6, seed, gen_mode: 't2i', batch_size: h3BatchN, control_after_generate: h3Ctrl, ...(isCustom ? { width: cw, height: ch } : {}) };
+    opts = { prompt, mode: h3Mode, variant: params.variant, turbo: params.turbo, aspectRatio: aspect_ratio, resolutionProfile: resolution_profile, qualityProfile: quality_profile, optimizeForStill: !!optimize_for_still, sourceFidelity: Number(source_fidelity) || 0.6, seed, refImages: h3RefPaths, source: 'h3', ...(isCustom ? { width: cw, height: ch } : {}) };
   } else {
     params = { clip_name, clip_type, clip_device, vae_name, unet_name, weight_dtype, width, height, batch_size, shift, seed, steps, cfg, sampler_name, scheduler, denoise, layered: !!layered, layers: Math.max(2, Math.min(8, Math.floor(Number(layers) || 3))), gen_mode: genMode, upscale_method: upMethod };
     opts = { prompt, negativePrompt: negative_prompt, clipName: clip_name, clipType: clip_type, clipDevice: clip_device, vaeName: vae_name, unetName: unet_name, weightDtype: weight_dtype, width, height, batchSize: batch_size, shift, seed, steps, cfg, samplerName: sampler_name, scheduler, denoise, layered: !!layered, layers: Math.max(2, Math.min(8, Math.floor(Number(layers) || 3))), genMode, srcImagePath, upscaleMethod: upMethod, source: src };
   }
-  const info = db.prepare('INSERT INTO img_jobs(user_id, prompt, negative_prompt, params, status, source) VALUES(?,?,?,?,?,?)')
-    .run(req.user.id, String(prompt || '').trim() || (genMode === 'upscale' ? '[纯超分放大]' : ''), String(negative_prompt || ''), JSON.stringify(params), 'pending', src);
+  const promptText = String(prompt || '').trim() || (genMode === 'upscale' ? '[纯超分放大]' : '');
+  const insertJob = db.prepare('INSERT INTO img_jobs(user_id, prompt, negative_prompt, params, status, source) VALUES(?,?,?,?,?,?)');
+  if (h3Batch && h3Batch.n > 1) {
+    // v1.0.45：批量 N 条任务，params/opts 记每条实际种子（再生成可精确复现单条）
+    const ids = [];
+    for (let i = 0; i < h3Batch.n; i++) {
+      const s = h3Batch.seedFor(i);
+      const pi = { ...params, seed: s };
+      const oi = { ...opts, seed: s };
+      const info = insertJob.run(req.user.id, promptText, String(negative_prompt || ''), JSON.stringify(pi), 'pending', src);
+      const jid = Number(info.lastInsertRowid);
+      ids.push(jid); enqueue(jid, oi);
+    }
+    return res.json({ ok: true, id: ids[0], ids, batch: ids.length });
+  }
+  if (h3Batch) { params.seed = h3Batch.seedFor(0); opts.seed = params.seed; }
+  const info = insertJob.run(req.user.id, promptText, String(negative_prompt || ''), JSON.stringify(params), 'pending', src);
   const jobId = Number(info.lastInsertRowid);
   enqueue(jobId, opts);
   res.json({ ok: true, id: jobId });

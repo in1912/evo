@@ -1158,6 +1158,8 @@ function h3iDefaults() {
     optimize_for_still: true,
     turbo: '8',                            // '8' | '4' | 'off'（t2i 用 Turbo LoRA；参考图编辑固定 base 20 步）
     seed: -1,
+    width: 1024, height: 1024,             // v1.0.45 自定义尺寸（aspect_ratio='custom' 时生效，32 的倍数）
+    batch_size: 1, control_after_generate: 'randomize', // v1.0.45 批量与种子策略（randomize/fixed/increment/decrement）
     source_fidelity: 0.6,                  // 参考图编辑：源图保真度
   };
 }
@@ -1187,6 +1189,11 @@ function buildH3ImageWorkflow(p) {
                           : (p.unet || models.h3i_model || 'minimax_h3_fl2va_pruned_int8_convrot.safetensors'));
   const refs = (p.refNames || []).slice(0, 9);
 
+  // v1.0.45 自定义尺寸：aspectRatio='custom' 时宽高直传 prepare 节点（32 圆整、256~16384 夹取），预设节点输出不参与
+  const custom = p.aspectRatio === 'custom';
+  const snap32 = (n, dft) => { const v = Math.round(Number(n) || dft); return Math.max(256, Math.min(16384, Math.round(v / 32) * 32)); };
+  const cw = custom ? snap32(p.width, 1024) : 0, ch = custom ? snap32(p.height, 1024) : 0;
+
   const wf = {
     '2': { class_type: 'CLIPLoader', inputs: { clip_name: p.clipName || models.h3i_clip || 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors', type: 'minimax', device: 'default' } },
     '3': { class_type: 'VAELoader', inputs: { vae_name: p.vaeName || models.h3i_vae || 'minimax_h3_video_vae_fp16.safetensors' } },
@@ -1195,9 +1202,9 @@ function buildH3ImageWorkflow(p) {
   if (variant === 'gguf') wf['1'] = { class_type: 'UnetLoaderGGUF', inputs: { unet_name: unet } };
   else wf['1'] = { class_type: 'UNETLoader', inputs: { unet_name: unet, weight_dtype: 'default' } };
 
-  // 分辨率预设：参考图编辑选「source image」时按源图比例
-  const res = { class_type: 'H3ImageResolutionPreset', inputs: { aspect_ratio: p.aspectRatio || '1:1 square', resolution_profile: p.resolutionProfile || 'native detail | 0.98 MP' } };
-  if (mode === 'refedit' && refs.length && res.inputs.aspect_ratio === 'source image') res.inputs.source_image = ['0', 0];
+  // 分辨率预设：参考图编辑选「source image」时按源图比例；custom 时节点保留占位（输出不被引用，宽高直传 prepare）
+  const res = { class_type: 'H3ImageResolutionPreset', inputs: { aspect_ratio: custom ? '1:1 square' : (p.aspectRatio || '1:1 square'), resolution_profile: p.resolutionProfile || 'native detail | 0.98 MP' } };
+  if (!custom && mode === 'refedit' && refs.length && res.inputs.aspect_ratio === 'source image') res.inputs.source_image = ['0', 0];
   wf['4'] = res;
 
   if (mode === 'refedit') {
@@ -1208,7 +1215,7 @@ function buildH3ImageWorkflow(p) {
       inputs: {
         clip: ['2', 0], vae: ['3', 0], source_image: ['0', 0],
         edit_instruction: String(p.prompt || '').trim(),
-        width: ['4', 0], height: ['4', 1],
+        width: custom ? cw : ['4', 0], height: custom ? ch : ['4', 1],
         quality_profile: p.qualityProfile || 'recommended | 5 frames',
         source_fidelity: Math.max(0, Math.min(1, Number(p.sourceFidelity) || 0.6)),
         source_fit: 'crop_center', reference_detail: 'max_identity_2048', optimize_for_still: p.optimizeForStill !== false,
@@ -1221,7 +1228,7 @@ function buildH3ImageWorkflow(p) {
       class_type: 'H3TextToImagePrepare',
       inputs: {
         clip: ['2', 0], prompt: String(p.prompt || '').trim(),
-        width: ['4', 0], height: ['4', 1],
+        width: custom ? cw : ['4', 0], height: custom ? ch : ['4', 1],
         quality_profile: p.qualityProfile || 'recommended | 5 frames', optimize_for_still: p.optimizeForStill !== false,
       },
     };
@@ -1248,7 +1255,7 @@ function buildH3ImageWorkflow(p) {
 }
 
 // H3-Image 生成主入口（与 generateImage 同一套提交/轮询/取回骨架）
-async function generateH3Image({ prompt, mode, variant, turbo, aspectRatio, resolutionProfile, qualityProfile, optimizeForStill, seed, sourceFidelity, refImages }, onProgress, taskRef) {
+async function generateH3Image({ prompt, mode, variant, turbo, aspectRatio, resolutionProfile, qualityProfile, optimizeForStill, seed, sourceFidelity, refImages, width, height }, onProgress, taskRef) {
   const prog = (s, pct) => { if (typeof onProgress === 'function') onProgress(s, pct); };
   const jobId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const base = baseUrl('zimage'); // 与文生图共用统一后端（本地 8189 / 远端同源切换）
@@ -1283,7 +1290,7 @@ async function generateH3Image({ prompt, mode, variant, turbo, aspectRatio, reso
   }
 
   prog('组装工作流…', 12);
-  const wf = buildH3ImageWorkflow({ mode: m, variant, turbo, prompt, aspectRatio, resolutionProfile, qualityProfile, optimizeForStill, seed, sourceFidelity, refNames, prefix: `h3i_${jobId}`, models: modelMap('h3i') });
+  const wf = buildH3ImageWorkflow({ mode: m, variant, turbo, prompt, aspectRatio, resolutionProfile, qualityProfile, optimizeForStill, seed, sourceFidelity, width, height, refNames, prefix: `h3i_${jobId}`, models: modelMap('h3i') });
 
   prog('提交 ComfyUI…', 22);
   const mon = progressMonitor(base);

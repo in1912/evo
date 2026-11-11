@@ -1347,6 +1347,7 @@
             </div>
           </div>
           <button class="btn primary" :disabled="busy" @click="go">{{ busy ? '生成中' : '开始生成' }}</button>
+          <button class="btn" :disabled="busy || batchBusy" @click="openBatch" title="粘贴多段提示词（每段以「## 图1」标题行分隔），一键批量提交多个任务排队执行">批量生成</button>
           <button v-if="busy" class="btn danger" @click="stopJob" title="停止当前任务（排队中的直接出队，执行中的安全打断）">停止</button>
         </div>
       </div>
@@ -1354,7 +1355,14 @@
 
       <div class="card">
         <h3 style="margin:0 0 12px">功能控制框</h3>
-        <div class="field"><label>正向提示词{{ refs.length ? '（编辑指令：说明怎么改源图，可用 <Picture 1>/<Picture 2> 指代图片）' : '（必填）' }}</label><textarea v-model="p.prompt" style="min-height:120px"></textarea></div>
+        <div class="grid-2">
+          <div class="field"><label>正向提示词{{ refs.length ? '（编辑指令：说明怎么改源图，可用 <Picture 1>/<Picture 2> 指代图片）' : '（必填）' }}</label><textarea v-model="p.prompt" style="min-height:140px"></textarea></div>
+          <div class="field"><label>负向提示词（H3 模型无负面条件输入，仅随任务记录保存，不参与生成）</label>
+            <div style="display:flex;gap:6px;margin-bottom:6px">
+              <button class="btn sm" type="button" @click="p.negative = ''" title="清空负向提示词">清空</button>
+            </div>
+            <textarea v-model="p.negative" style="min-height:140px"></textarea></div>
+        </div>
         <div class="row">
           <div class="field"><label>模型变体（int8 切换位）</label>
             <select v-model="p.variant">
@@ -1374,19 +1382,48 @@
             <select v-model="p.aspect_ratio">
               <option v-for="a in aspectList" :key="a" :value="a">{{ a }}</option>
               <option v-if="refs.length" value="source image">source image（跟随源图）</option>
+              <option value="custom">自定义尺寸（自由宽高）</option>
             </select>
           </div>
           <div class="field"><label>分辨率档位</label>
-            <select v-model="p.resolution_profile"><option v-for="r in resList" :key="r" :value="r">{{ r }}</option></select>
+            <select v-model="p.resolution_profile" :disabled="p.aspect_ratio === 'custom'" :title="p.aspect_ratio === 'custom' ? '自定义尺寸下分辨率档位不参与（宽高直接生效）' : ''"><option v-for="r in resList" :key="r" :value="r">{{ r }}</option></select>
           </div>
           <div class="field"><label>质量档位（潜在帧数：多帧更稳更慢）</label>
             <select v-model="p.quality_profile"><option v-for="q in qualList" :key="q" :value="q">{{ q }}</option></select>
           </div>
           <div class="field"><label>种子（-1 随机）</label><input v-model="p.seed" /></div>
+          <div class="field"><label>种子策略</label>
+            <select v-model="p.control_after_generate" title="批量大于 1 时：fixed=每张同种子，increment/decrement=逐张 ±1">
+              <option value="randomize">randomize（每张随机）</option>
+              <option value="fixed">fixed（固定复现）</option>
+              <option value="increment">increment（逐张 +1）</option>
+              <option value="decrement">decrement（逐张 -1）</option>
+            </select>
+          </div>
+          <div class="field"><label>批量大小（1-8 张）</label><input type="number" min="1" max="8" v-model.number="p.batch_size" /></div>
           <div class="field" v-if="refs.length" style="min-width:220px"><label>源图保真度（{{ p.source_fidelity }} · 低=敢改，高=守形）</label><input type="range" min="0" max="1" step="0.05" v-model.number="p.source_fidelity" style="width:100%" /></div>
           <div class="field" style="min-width:0;flex:none;display:flex;align-items:flex-end;padding-bottom:4px">
             <label class="chk" style="display:flex;align-items:center;gap:6px;white-space:nowrap"><input type="checkbox" v-model="p.optimize_for_still" /> 静图优化（optimize_for_still）</label>
           </div>
+        </div>
+
+        <div class="row" v-if="p.aspect_ratio === 'custom'" style="margin-top:12px">
+          <div class="field"><label>图像宽度（32 的倍数，自动圆整）</label><input type="number" min="256" max="16384" step="32" v-model.number="p.width" /></div>
+          <div class="field"><label>图像高度（32 的倍数，自动圆整）</label><input type="number" min="256" max="16384" step="32" v-model.number="p.height" /></div>
+          <div class="field" style="min-width:0;flex:none;display:flex;align-items:flex-end;padding-bottom:4px">
+            <button class="btn sm" @click="swapSize" title="宽高互换">⇄ 互换</button>
+          </div>
+          <div class="field"><label>常用尺寸</label>
+            <select v-model="sizePreset" @change="applyPreset"><option value="">— 手动输入 —</option><option v-for="s in sizePresets" :key="s.v" :value="s.v">{{ s.label }}</option></select>
+          </div>
+          <div class="field"><label>锁定比例</label>
+            <select v-model="ratioLock" @change="onRatioLock">
+              <option value="">不锁定</option>
+              <option value="16:9">16:9</option>
+              <option value="4:3">4:3</option>
+            </select>
+          </div>
+          <div class="muted" style="align-self:center;font-size:12px;flex:1;min-width:200px">范围 256~16384；与文生图Z 相同的尺寸机制（预设 / 锁比 / 互换），H3 侧提交时按 32 圆整。</div>
         </div>
 
         <h3 style="margin:18px 0 8px">参考图 <span class="muted" style="font-weight:400;font-size:12px">（第一张=源图，最多再选 8 张=参考图 2..9；不选 = 纯文生图）</span></h3>
@@ -1417,23 +1454,61 @@
             <div style="margin-top:12px;text-align:right"><button class="btn sm" @click="pickOpen = false">取消</button></div>
           </div>
         </div>
+        <!-- v1.0.45 批量生成：粘贴「## 图N」分段提示词，一键提交多个 H3 任务（对齐文生图Z） -->
+        <div v-if="batchOpen" class="overlay" @click.self="closeBatch">
+          <div class="card" style="max-width:860px;width:94vw;max-height:86vh;overflow:auto">
+            <h3 style="margin:0 0 10px">批量生成（文生图H3）</h3>
+            <div class="muted" style="margin-bottom:8px;font-size:12px">粘贴多段提示词，每段前面加一行以分割关键词开头的标题（默认「## 图1」「## 图2」…）。每段提交为一个独立任务（每段 1 张），共用当前参数区的尺寸 / 档位等设置，按顺序自动排队执行。带参考图的批量走参考图编辑模式（参考图共用当前已选）。</div>
+            <div class="row" style="align-items:center;margin-bottom:8px;flex-wrap:wrap">
+              <label style="flex:none;font-size:13px;font-weight:600">分割关键词</label>
+              <input v-model="batchSep" style="width:170px" placeholder="## 图" title="以该关键词开头的行视为一段的标题行" />
+              <span class="muted" style="flex:1;min-width:220px;font-size:12px">以该关键词开头的行 = 新一段的开始；留空用默认「## 图」</span>
+            </div>
+            <textarea v-model="batchText" style="width:100%;min-height:300px;font-size:13px" placeholder="## 图1&#10;1、场景环境：…&#10;2、人物姿态：…&#10;&#10;## 图2&#10;1、场景环境：…"></textarea>
+            <div v-if="batchText.trim()" class="row" style="align-items:center;margin-top:8px;flex-wrap:wrap">
+              <b style="flex:none">解析出 {{ batchList.length }} 个任务</b>
+              <span v-if="!batchList.length" class="alert err" style="margin:0;flex:1">没识别到分段：每段提示词前需要一行以分割关键词开头的标题行（当前「{{ batchSep || '## 图' }}」）</span>
+              <span v-else class="muted ellip" style="flex:1;font-size:12px" :title="batchList.map(t=>t.title).join(' / ')">{{ batchList.map(t=>t.title).join(' / ') }}</span>
+            </div>
+            <div style="margin-top:12px;text-align:right">
+              <button class="btn sm" :disabled="batchBusy" @click="closeBatch">取消</button>
+              <button class="btn sm primary" style="margin-left:8px" :disabled="batchBusy || !batchList.length" @click="submitBatch">{{ batchBusy ? '提交中 ' + batchDone + '/' + batchList.length + '…' : '一键提交 ' + batchList.length + ' 个任务' }}</button>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div class="card" style="margin-top:16px">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-          <h3 style="margin:0">生成队列（文生图H3）</h3>
-          <button class="btn sm" @click="openFolder">打开输出目录</button>
+        <h3>最近生成图
+          <button class="btn sm" style="margin-left:10px" @click="openFolder">打开文件夹</button>
+          <span class="muted" style="margin-left:10px">共 {{ doneImages.length }} 张</span>
+          <button class="btn sm" style="margin-left:10px" :disabled="stripPage<=0" @click="stripPage--">‹</button>
+          <button class="btn sm" :disabled="(stripPage+1)*stripSize>=doneImages.length" @click="stripPage++">›</button>
+        </h3>
+        <div v-if="!doneImages.length" class="muted">暂无已完成的图片</div>
+        <div v-else class="img-strip">
+          <div v-for="im in stripSlice" :key="im.id" class="img-strip-card" :title="im.prompt || ''">
+            <img :src="imgUrl(im)" style="cursor:zoom-in" @click="zoomImg(im)" />
+            <div class="vmeta"><span class="muted">#{{ im.id }}</span><a class="btn sm" :href="imgUrl(im)" download>下载</a></div>
+          </div>
         </div>
-        <table>
-          <thead><tr><th>ID</th><th>状态</th><th>进度</th><th>耗时</th><th>模式</th><th>提示词</th><th>操作</th></tr></thead>
+        <div v-if="doneImages.length > stripSize" class="muted" style="margin-top:6px">点图片可放大，放大后 ← → 翻看全部 {{ doneImages.length }} 张</div>
+      </div>
+
+      <div class="card" style="margin-top:16px">
+        <h3>任务队列详情</h3>
+        <div v-if="!queue.length" class="muted">队列为空</div>
+        <table v-else class="tbl">
+          <thead><tr><th>序号</th><th>提示词</th><th>尺寸</th><th>状态</th><th>过程</th><th>耗时</th><th>使用模型</th><th>结果</th></tr></thead>
           <tbody>
             <tr v-for="q in queuePage" :key="q.id">
-              <td>#{{ q.id }}</td>
+              <td>{{ q.id }}</td>
+              <td class="ellip" :title="q.prompt">{{ q.prompt || '-' }}</td>
+              <td>{{ whOf(q) }}</td>
               <td><span class="badge" :class="typeBadge(q.status)">{{ statusLabel(q.status) }}</span></td>
-              <td style="min-width:140px"><div class="progress" style="height:6px"><div :style="{ width: (q.progress_pct || 0) + '%' }"></div></div><span class="muted" style="font-size:11px">{{ q.progress }}</span></td>
+              <td class="ellip" :title="q.progress">{{ q.progress || '-' }}</td>
               <td class="muted">{{ fmtDur(q.duration_ms) }}</td>
-              <td>{{ modeOf(q) }}</td>
-              <td class="ellip" :title="q.prompt" style="max-width:260px">{{ q.prompt }}</td>
+              <td class="ellip" :title="modelOf(q)">{{ modelOf(q) }}</td>
               <td style="white-space:nowrap">
                 <button class="btn sm" @click="regen(q)" title="把该任务的参数还原到上方参数框（参考图需重选）">再生成</button>
                 <a v-if="q.image_path" class="btn sm" :href="authed('/api/image/output/' + basename(q.image_path))" download>下载</a>
@@ -1445,6 +1520,10 @@
         </table>
         <div v-if="queue.length > qPageSize || qPage > 0" class="row" style="flex:none;justify-content:flex-end;align-items:center;gap:8px;margin-top:10px;flex-wrap:wrap">
           <span class="muted">共 {{ queue.length }} 条</span>
+          <select v-model.number="qPageSize" @change="qPage = 0" style="width:auto">
+            <option>10</option><option>20</option><option>30</option><option>50</option><option>100</option>
+          </select>
+          <span class="muted">条/页</span>
           <button class="btn sm" :disabled="qPage <= 0" @click="qPage--">‹ 上一页</button>
           <span class="muted">{{ qPage + 1 }} / {{ qTotalPages }}</span>
           <button class="btn sm" :disabled="(qPage + 1) * qPageSize >= queue.length" @click="qPage++">下一页 ›</button>
@@ -1453,20 +1532,38 @@
     </div>`,
     data() {
       return {
-        p: { prompt: '', variant: 'int8', turbo: '8', aspect_ratio: '1:1 square', resolution_profile: 'native detail | 0.98 MP', quality_profile: 'recommended | 5 frames', optimize_for_still: true, seed: -1, source_fidelity: 0.6 },
+        p: { prompt: '', negative: '', variant: 'int8', turbo: '8', aspect_ratio: '1:1 square', resolution_profile: 'native detail | 0.98 MP', quality_profile: 'recommended | 5 frames', optimize_for_still: true, seed: -1, source_fidelity: 0.6, width: 1024, height: 1024, batch_size: 1, control_after_generate: 'randomize' },
         refs: [],            // [{ name, dataUrl, ext, data }]（data=base64，提交用；文件大不进 params）
+        ratioLock: '', ratio: 0, _syncing: false, sizePreset: '', sizePresets: SIZE_PRESETS,
         aspectList: ['1:1 square', '4:5 portrait', '3:4 portrait', '2:3 portrait', '9:16 portrait', '16:9 landscape', '3:2 landscape', '4:3 landscape', '21:9 ultrawide'],
         resList: ['fast preview | 0.40 MP', 'balanced | 0.70 MP', 'high | 0.90 MP', 'native detail | 0.98 MP', 'high-res | 2.00 MP', 'ultra | 4.00 MP', 'ultra+ | 8.00 MP'],
         qualList: ['single image | 1 frame (image VAE)', 'recommended | 5 frames', 'extended quality | 9 frames', 'high quality | 13 frames', 'maximum quality | 20 frames (slow)'],
         pickOpen: false, pickBusy: false, pickList: [],
+        batchOpen: false, batchText: '', batchBusy: false, batchDone: 0, batchSep: '## 图', // v1.0.45 批量生成（对齐文生图Z）
         busy: false, statusText: '', job: null, timer: null, now: 0,
-        queue: [], qTimer: null, qPage: 0, qPageSize: 10, pctHigh: 0,
+        queue: [], qTimer: null, stripPage: 0, stripSize: 10, qPage: 0, qPageSize: 10, pctHigh: 0,
         _clock: null, _t0: 0,
       };
     },
     computed: {
+      doneImages() { return (this.queue || []).filter((q) => q.status === 'done' && q.image_path); },
+      stripSlice() { const s = this.stripPage * this.stripSize; return this.doneImages.slice(s, s + this.stripSize); },
       qTotalPages() { return Math.max(1, Math.ceil((this.queue || []).length / this.qPageSize)); },
       queuePage() { return (this.queue || []).slice(this.qPage * this.qPageSize, (this.qPage + 1) * this.qPageSize); },
+      // v1.0.45 批量生成解析（同文生图Z）：以 batchSep 开头的行 = 标题行
+      batchList() {
+        const sep = String(this.batchSep || '').trim() || '## 图';
+        const lines = String(this.batchText || '').split(/\r?\n/);
+        const out = []; let cur = null;
+        for (const ln of lines) {
+          if (ln.trim().startsWith(sep.trim())) {
+            if (cur) out.push(cur);
+            cur = { title: ln.trim().replace(/^#{1,6}\s+/, '').trim() || ('任务' + (out.length + 1)), text: '' };
+          } else if (cur) cur.text += (cur.text ? '\n' : '') + ln;
+        }
+        if (cur) out.push(cur);
+        return out.filter((t) => { t.text = t.text.trim(); return t.text; });
+      },
       jobProgressPct() {
         if (!this.job) return 0;
         if (this.job.status === 'done' || this.job.status === 'failed') return 100;
@@ -1491,6 +1588,11 @@
       this.qTimer = setInterval(() => this.refreshQueue(), 3000);
     },
     beforeUnmount() { if (this.timer) clearInterval(this.timer); if (this.qTimer) clearInterval(this.qTimer); if (this._clock) clearInterval(this._clock); },
+    watch: {
+      // 自定义尺寸锁比联动（同文生图Z：_syncing 防回环，flush sync 保证即时）
+      'p.width': { flush: 'sync', handler(v) { if (this._syncing) return; this.sizePreset = ''; if (this.ratioLock && this.ratio && Number(v) > 0) { this._syncing = true; this.p.height = Math.round(Number(v) / this.ratio); this._syncing = false; } } },
+      'p.height': { flush: 'sync', handler(v) { if (this._syncing) return; this.sizePreset = ''; if (this.ratioLock && this.ratio && Number(v) > 0) { this._syncing = true; this.p.width = Math.round(Number(v) * this.ratio); this._syncing = false; } } },
+    },
     methods: {
       authed, basename,
       startClock(fromTs) { this._t0 = fromTs || Date.now(); if (!this._clock) this._clock = setInterval(() => { this.now = Date.now(); }, 1000); this.now = Date.now(); },
@@ -1505,11 +1607,73 @@
         return m + 'm' + (s ? s + 's' : '');
       },
       modeOf(q) { try { return (JSON.parse(q.params || '{}').mode === 'refedit') ? '参考图编辑' : '文生图'; } catch { return '-'; } },
+      whOf(q) { try { const pp = JSON.parse(q.params || '{}'); if (pp.width && pp.height) return pp.width + '×' + pp.height; return String(pp.aspect_ratio || '-').split(' ')[0]; } catch { return '-'; } },
+      modelOf(q) {
+        try {
+          const pp = JSON.parse(q.params || '{}');
+          const v = { int8: 'fl2va int8', gguf: 'GGUF Q4_0', ph3: 'P-H3 w4a8' }[pp.variant] || pp.variant || 'int8';
+          const t = { '8': 'Turbo8', '4': 'Turbo4', off: 'base20' }[pp.turbo] || pp.turbo || '';
+          return pp.mode === 'refedit' ? 'ref2va int8 · base20' : (v + ' · ' + t);
+        } catch { return '-'; }
+      },
+      imgUrl(q) { return authed('/api/image/output/' + basename(q.image_path)); },
+      zoomImg(im) {
+        const items = this.doneImages.map((q) => ({ kind: 'image', url: this.imgUrl(q), title: q.prompt || '', sub: '#' + q.id + ' · ' + (q.created_at || '') }));
+        openViewer(items, this.doneImages.indexOf(im));
+      },
+      openBatch() { this.batchOpen = true; },
+      closeBatch() { if (!this.batchBusy) this.batchOpen = false; },
+      async submitBatch() {
+        const list = this.batchList;
+        if (!list.length || this.batchBusy) return;
+        this.batchBusy = true; this.batchDone = 0;
+        const _busy = await busyBefore();
+        let ok = 0; const fails = [];
+        for (const it of list) {
+          try {
+            const body = {
+              prompt: it.text, negative_prompt: this.p.negative, source: 'h3',
+              variant: this.p.variant, turbo: this.p.turbo,
+              aspect_ratio: this.p.aspect_ratio, resolution_profile: this.p.resolution_profile, quality_profile: this.p.quality_profile,
+              optimize_for_still: this.p.optimize_for_still, seed: this.p.seed, source_fidelity: this.p.source_fidelity,
+              batch_size: 1, control_after_generate: this.p.control_after_generate || 'randomize',
+              ...(this.p.aspect_ratio === 'custom' ? { width: Math.round(Number(this.p.width) || 1024), height: Math.round(Number(this.p.height) || 1024) } : {}),
+              images: this.refs.map((r) => ({ data: r.data, ext: r.ext })),
+            };
+            await api('POST', '/image/generate', body);
+            ok++;
+          } catch (e) { fails.push(it.title + '：' + e.message); }
+          this.batchDone++;
+        }
+        this.batchBusy = false;
+        this.refreshQueue(); queueBusyNotice(_busy);
+        if (fails.length) alert('批量提交完成：成功 ' + ok + ' 个，失败 ' + fails.length + ' 个\n' + fails.join('\n'));
+        else { this.batchOpen = false; this.statusText = '批量提交完成（' + ok + ' 个任务已排队）'; }
+      },
+      // ---- 自定义尺寸（与文生图Z 同机制）----
+      applyPreset() {
+        const v = this.sizePreset; if (!v) return;
+        const [w, h] = v.split('x').map(Number);
+        this._syncing = true; this.p.width = w; this.p.height = h; this._syncing = false;
+        this.detectLock();
+      },
+      onRatioLock() {
+        const map = { '16:9': 16 / 9, '4:3': 4 / 3 };
+        this.ratio = map[this.ratioLock] || 0;
+        if (this.ratio && Number(this.p.width) > 0) { this._syncing = true; this.p.height = Math.round(Number(this.p.width) / this.ratio); this._syncing = false; }
+      },
+      detectLock() {
+        const r = Number(this.p.height) > 0 ? Number(this.p.width) / Number(this.p.height) : 0;
+        if (Math.abs(r - 16 / 9) < 0.02) { this.ratioLock = '16:9'; this.ratio = 16 / 9; }
+        else if (Math.abs(r - 4 / 3) < 0.02) { this.ratioLock = '4:3'; this.ratio = 4 / 3; }
+        else { this.ratioLock = ''; this.ratio = 0; }
+      },
+      swapSize() { const w = this.p.width; this._syncing = true; this.p.width = this.p.height; this.p.height = w; this._syncing = false; this.detectLock(); },
       async loadDefaults() {
         try {
           const d = await api('GET', '/image/h3-defaults');
           if (d.prompt && !this.p.prompt) this.p.prompt = d.prompt;
-          for (const k of ['variant', 'turbo', 'aspect_ratio', 'resolution_profile', 'quality_profile', 'source_fidelity']) if (d[k] !== undefined) this.p[k] = d[k];
+          for (const k of ['variant', 'turbo', 'aspect_ratio', 'resolution_profile', 'quality_profile', 'source_fidelity', 'batch_size', 'control_after_generate', 'width', 'height']) if (d[k] !== undefined) this.p[k] = d[k];
           if (d.optimize_for_still !== undefined) this.p.optimize_for_still = !!d.optimize_for_still;
         } catch (e) { /* 后端不可达时保留默认值 */ }
       },
@@ -1571,9 +1735,14 @@
       regen(q) {
         let pp = {};
         try { pp = JSON.parse(q.params || '{}'); } catch (e) { alert('该任务参数无法解析'); return; }
-        for (const k of ['variant', 'turbo', 'aspect_ratio', 'resolution_profile', 'quality_profile', 'source_fidelity', 'seed']) if (pp[k] !== undefined) this.p[k] = pp[k];
-        if (pp.optimize_for_still !== undefined) this.p.optimize_for_still = !!pp.optimize_for_still;
+        this._syncing = true; // 整体写回：不让宽高互锁中途重算（同文生图Z）
+        for (const k of Object.keys(this.p)) if (pp[k] !== undefined) this.p[k] = pp[k];
+        this._syncing = false;
         this.p.prompt = String(q.prompt || '');
+        this.p.negative = String(q.negative_prompt || '');
+        const w = Number(this.p.width) || 0, h = Number(this.p.height) || 0;
+        if (w > 0 && h > 0) this.detectLock();
+        this.sizePreset = matchPreset(w, h); // 恰好等于某预设时下拉同步选中
         this.statusText = '已还原任务 #' + q.id + ' 的参数（参考图不随任务保存，需重新选择），确认后点「开始生成」';
         window.scrollTo({ top: 0, behavior: 'smooth' });
       },
@@ -1583,10 +1752,13 @@
         this.busy = true; this.job = null; this.statusText = '提交中…'; this.pctHigh = 0; this.startClock();
         try {
           const body = {
-            prompt: this.p.prompt, source: 'h3',
+            prompt: this.p.prompt, negative_prompt: this.p.negative, source: 'h3',
             variant: this.p.variant, turbo: this.p.turbo,
             aspect_ratio: this.p.aspect_ratio, resolution_profile: this.p.resolution_profile, quality_profile: this.p.quality_profile,
             optimize_for_still: this.p.optimize_for_still, seed: this.p.seed, source_fidelity: this.p.source_fidelity,
+            batch_size: Math.max(1, Math.min(8, Number(this.p.batch_size) || 1)),
+            control_after_generate: this.p.control_after_generate || 'randomize',
+            ...(this.p.aspect_ratio === 'custom' ? { width: Math.round(Number(this.p.width) || 1024), height: Math.round(Number(this.p.height) || 1024) } : {}),
             images: this.refs.map((r) => ({ data: r.data, ext: r.ext })),
           };
           const _busy = await busyBefore();
@@ -5390,7 +5562,7 @@
   // 手动 F5 才拿到新代码（2026-11-10 报障「广告图默认还是 1920」实为部署前的旧标签页）。
   // 站内导航时对 /api/health 版本（30s 节流；用户取消提醒后 10 分钟内不再打扰）。
   const PAGE_VER = (((document.querySelector('script[src*="app.js?v="]') || {}).src || '').match(/[?&]v=([0-9.]+)/) || [])[1] || '';
-  let verCheckedAt = 0, verSnoozeUntil = 0;
+  let verCheckedAt = 0, verSnoozeUntil = 0, verPrompted = false;
   async function checkVersion() {
     if (!PAGE_VER || !store.user) return;
     const now = Date.now();
@@ -5399,6 +5571,10 @@
     try {
       const h = await api('GET', '/health');
       if (h.version && h.version !== PAGE_VER) {
+        // v1.0.45：每次页面加载最多提醒一次——确认刷新后版本仍不一致说明缓存层有问题，
+        // 再弹也解决不了（1.0.44 部署后 index.html 的 ?v= 没跟包走，刷新一次弹一次）。
+        if (verPrompted) return;
+        verPrompted = true;
         if (confirm('系统已更新到 v' + h.version + '，当前页面还是旧版（v' + PAGE_VER + '）。现在刷新加载新版？')) location.reload();
         else verSnoozeUntil = now + 600000;
       }
