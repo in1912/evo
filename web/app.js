@@ -2312,6 +2312,13 @@
   };
 
   // ---------- 视频生成（MiniMax-H3：图生视频 / 文生视频） ----------
+  // 需求33 生视频H3 常用尺寸：文生图H3 现有预设全量 + 480P/360P 两个视频档（引擎 latent 按 //16 对齐，854/360 照填即可）
+  const H3V_SIZE_PRESETS = SIZE_PRESETS.concat([
+    { v: '854x480', label: '854×480（480P）' },
+    { v: '640x360', label: '640×360（360P）' },
+  ]);
+  const matchH3VPreset = (w, h) => { const k = Number(w) + 'x' + Number(h); return H3V_SIZE_PRESETS.some((s) => s.v === k) ? k : ''; };
+
   const H3 = {
     template: `
     <div>
@@ -2455,6 +2462,12 @@
           <div class="field"><label>镜头数（shot_count）</label><input type="number" v-model.number="p.shot_count" min="0" max="8" /></div>
           <div class="field"><label>宽（width）</label><input type="number" v-model.number="p.width" min="32" /></div>
           <div class="field"><label>高（height）</label><input type="number" v-model.number="p.height" min="32" /></div>
+          <div class="field" style="min-width:0;flex:none;display:flex;align-items:flex-end;padding-bottom:4px">
+            <button class="btn sm" @click="swapSize" title="宽高互换（横竖版切换）">⇄ 互换</button>
+          </div>
+          <div class="field"><label>常用尺寸</label>
+            <select v-model="sizePreset" @change="applyPreset"><option value="">— 手动输入 —</option><option v-for="s in sizePresets" :key="s.v" :value="s.v">{{ s.label }}</option></select>
+          </div>
           <div class="field">
             <label>每镜头帧数（frames_per_shot）≈ {{ framesSecHint }}</label>
             <div class="row" style="flex-wrap:nowrap;gap:8px">
@@ -2536,7 +2549,8 @@
         refs: [], // v1.0.55 人物参考图（≤3 张 {dataUrl, ext}，ref2va 参考行；与尾帧互斥）
         pickOpen: false, pickBusy: false, pickList: [], pickTarget: 'first', // v1.0.43 从系统选图（首帧/尾帧参考图）
         pasteOpen: false, pasteTarget: 'first', pasteTitle: '', // 需求28 粘贴图片（首帧/尾帧参考图）
-        p: { prompt: '', model_name: '', clip_name: '', clip_type: 'minimax', mmproj_name: '(auto)', video_vae: '', audio_vae: '', shot_count: 1, width: 480, height: 832, frames_per_shot: 362, seed: 20260722, steps: 20, seed_per_shot: true, sampler_name: 'euler', scheduler: 'beta', self_anchor_voice: false, output_scale: 1, fps: 24, bit_depth: 'auto', color_space: 'sRGB' },
+        p: { prompt: '', model_name: '', clip_name: '', clip_type: 'minimax', mmproj_name: '(auto)', video_vae: '', audio_vae: '', shot_count: 1, width: 480, height: 854, frames_per_shot: 362, seed: 20260722, steps: 20, seed_per_shot: true, sampler_name: 'euler', scheduler: 'beta', self_anchor_voice: false, output_scale: 1, fps: 24, bit_depth: 'auto', color_space: 'sRGB' },
+        sizePreset: '', sizePresets: H3V_SIZE_PRESETS, // 需求33 常用尺寸 + 互换（对齐文生图H3；默认 480×854 不在预设内 → 下拉显示「手动输入」）
         h3Status: { running: false, url: '', device: '' },
         batchOpen: false, batchText: '', batchBusy: false, batchDone: 0, batchSep: '## 图', // 需求30 批量生成（对齐文生图Z/文生图H3）
         busy: false, statusText: '', job: null, timer: null,
@@ -2587,7 +2601,15 @@
       authed, basename,
       async loadDefaults() {
         try { const d = await api('GET', '/h3/defaults'); Object.assign(this.p, d); } catch (e) {}
+        this.sizePreset = matchH3VPreset(this.p.width, this.p.height); // 需求33：默认恰为某预设时下拉同步选中
       },
+      // 需求33：常用尺寸 / 宽高互换（对齐文生图H3 机制）
+      applyPreset() {
+        const v = this.sizePreset; if (!v) return;
+        const [w, h] = v.split('x').map(Number);
+        this.p.width = w; this.p.height = h;
+      },
+      swapSize() { const w = this.p.width; this.p.width = this.p.height; this.p.height = w; },
       async loadStatus() { try { this.h3Status = await api('GET', '/h3/status'); } catch (e) {} },
       onFile(e, which) {
         const f = e.target.files[0]; if (!f) return;
@@ -2763,6 +2785,7 @@
         try { pp = JSON.parse(q.params || '{}'); } catch (e) { pp = {}; }
         for (const k of Object.keys(this.p)) if (pp[k] !== undefined) this.p[k] = pp[k];
         this.p.prompt = String(q.prompt || ''); // 提示词在独立列不在 params
+        this.sizePreset = matchH3VPreset(this.p.width, this.p.height); // 需求33：还原尺寸恰为某预设时下拉同步
         this.mode = pp.mode === 't2v' ? 't2v' : 'i2v';
         let note = '';
         if (q.image_path) {
