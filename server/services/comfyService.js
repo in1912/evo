@@ -160,6 +160,36 @@ const DEFAULT_NEGATIVE = '色调艳丽，过曝，静态，细节模糊不清，
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// v1.0.51 需求31：轮询容错——单次 fetch 断连（undici "terminated"，2026-11-11 生产实踩：
+// 图已生成落盘但轮询 fetch 断连把任务判死）不判死任务，连续 ~30 秒拉不到 history 才失败；
+// 期间 ComfyUI 若已完成，重试自然会看到 completed=true。
+async function fetchHistory(base, promptId, tries = 15) {
+  let lastErr = null;
+  for (let i = 0; i < tries; i++) {
+    try {
+      const hr = await fetch(base + '/history/' + promptId, { signal: AbortSignal.timeout(5000) });
+      if (hr.ok) return await hr.json();
+      lastErr = new Error('history HTTP ' + hr.status);
+    } catch (e) { lastErr = e; }
+    await sleep(2000);
+  }
+  throw lastErr || new Error('history 不可达');
+}
+
+// v1.0.51 需求31：跨类切换先释放显存——zimage/h3/h3i/i2v/qil 模型集互不共用，
+// 残留驻留会把下一条任务挤成分页采样（实测 1080×1920/9步：暖缓存 42s，残留驻留后 170s+）。
+// 提交前发现同一后端上一条是别的类，就 POST /free 干净卸载再加载（同类连续任务不受影响）。
+const lastKindByBase = new Map();
+async function freeIfKindSwitch(base, kind) {
+  try {
+    const prev = lastKindByBase.get(base);
+    if (prev && prev !== kind) {
+      await fetch(base + '/free', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ unload_models: true, free_memory: true }), signal: AbortSignal.timeout(15000) });
+    }
+  } catch { /* /free 失败不影响提交（ComfyUI 自己也会按需卸载，只是慢些） */ }
+  lastKindByBase.set(base, kind);
+}
+
 // ComfyUI 的 status.messages 形如 [[type, data], ...]，data 可能是字符串或
 // {exception_type, exception_message, ...}。这里转成可读文本，避免显示成 [object Object]。
 function readableError(messages) {
@@ -803,6 +833,7 @@ async function generate({ imagePath, endImagePath, prompt, negativePrompt, seed,
   // 提交
   prog('提交 ComfyUI…');
   const mon = progressMonitor(baseUrl());
+  await freeIfKindSwitch(baseUrl(), 'i2v'); // 需求31：跨类切换先释放显存
   const pr = await fetch(baseUrl() + '/prompt', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -826,8 +857,7 @@ async function generate({ imagePath, endImagePath, prompt, negativePrompt, seed,
   try {
     while (Date.now() < deadline) {
       checkCancelled(promptId);
-      const hr = await fetch(baseUrl() + `/history/${promptId}`, { signal: AbortSignal.timeout(5000) });
-      const hist = await hr.json();
+      const hist = await fetchHistory(baseUrl(), promptId);
       const entry = hist[promptId];
       if (entry && entry.status) {
         lastStatus = entry.status.status_str || lastStatus;
@@ -1128,6 +1158,7 @@ async function generateImage({ prompt, negativePrompt, clipName, clipType, clipD
 
   prog('提交 ComfyUI…', 22);
   const mon = progressMonitor(baseUrl('zimage'));
+  await freeIfKindSwitch(baseUrl('zimage'), 'zimage'); // 需求31：跨类切换先释放显存
   const pr = await fetch(baseUrl('zimage') + '/prompt', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ prompt: wf, client_id: mon.clientId }), signal: AbortSignal.timeout(30000),
@@ -1144,8 +1175,7 @@ async function generateImage({ prompt, negativePrompt, clipName, clipType, clipD
   try {
     while (Date.now() < deadline) {
       checkCancelled(promptId);
-      const hr = await fetch(baseUrl('zimage') + `/history/${promptId}`, { signal: AbortSignal.timeout(5000) });
-      const hist = await hr.json();
+      const hist = await fetchHistory(baseUrl('zimage'), promptId);
       const entry = hist[promptId];
       if (entry && entry.status) {
         lastStatus = entry.status.status_str || lastStatus;
@@ -1347,6 +1377,7 @@ async function generateH3Image({ prompt, mode, variant, turbo, aspectRatio, reso
 
   prog('提交 ComfyUI…', 22);
   const mon = progressMonitor(base);
+  await freeIfKindSwitch(base, 'h3i'); // 需求31：跨类切换先释放显存
   const pr = await fetch(base + '/prompt', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ prompt: wf, client_id: mon.clientId }), signal: AbortSignal.timeout(30000),
@@ -1363,8 +1394,7 @@ async function generateH3Image({ prompt, mode, variant, turbo, aspectRatio, reso
   try {
     while (Date.now() < deadline) {
       checkCancelled(promptId);
-      const hr = await fetch(base + `/history/${promptId}`, { signal: AbortSignal.timeout(5000) });
-      const hist = await hr.json();
+      const hist = await fetchHistory(base, promptId);
       const entry = hist[promptId];
       if (entry && entry.status) {
         lastStatus = entry.status.status_str || lastStatus;
@@ -1473,6 +1503,7 @@ async function generateQilImage({ prompt, negativePrompt, clipName, clipType, cl
   prog('提交 ComfyUI…', 22);
   const base = baseUrl('zimage');
   const mon = progressMonitor(base);
+  await freeIfKindSwitch(base, 'qil'); // 需求31：跨类切换先释放显存
   const pr = await fetch(base + '/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: wf, client_id: mon.clientId }), signal: AbortSignal.timeout(30000) });
   const pj = await pr.json();
   if (!pr.ok || !pj.prompt_id) throw new Error('ComfyUI 提交失败：' + JSON.stringify(pj).slice(0, 300));
@@ -1486,8 +1517,7 @@ async function generateQilImage({ prompt, negativePrompt, clipName, clipType, cl
   try {
     while (Date.now() < deadline) {
       checkCancelled(promptId);
-      const hr = await fetch(base + `/history/${promptId}`, { signal: AbortSignal.timeout(5000) });
-      hist = await hr.json();
+      const hist = await fetchHistory(base, promptId);
       const entry = hist[promptId];
       if (entry && entry.status) {
         lastStatus = entry.status.status_str || lastStatus;
@@ -1563,6 +1593,7 @@ async function generateH3Video({ imagePath, endImagePath, prompt, modelName, cli
 
   prog('提交 ComfyUI…', 25);
   const mon = progressMonitor(base);
+  await freeIfKindSwitch(base, 'h3'); // 需求31：跨类切换先释放显存
   const pr = await fetch(base + '/prompt', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ prompt: wf, client_id: mon.clientId }), signal: AbortSignal.timeout(30000),
@@ -1579,8 +1610,7 @@ async function generateH3Video({ imagePath, endImagePath, prompt, modelName, cli
   try {
     while (Date.now() < deadline) {
       checkCancelled(promptId);
-      const hr = await fetch(base + `/history/${promptId}`, { signal: AbortSignal.timeout(5000) });
-      const hist = await hr.json();
+      const hist = await fetchHistory(base, promptId);
       const entry = hist[promptId];
       if (entry && entry.status) {
         lastStatus = entry.status.status_str || lastStatus;
@@ -1670,4 +1700,4 @@ async function adoptRun({ base, promptId, kind, jobId, extract, deadlineMin = 13
 // 从任意 base（含本机 local 模式的 8189）经 HTTP /view 下载产物——收养路径统一走 HTTP，避免依赖当前模式
 async function downloadOutput(out, dst, base) { await fetchOutputTo(out, dst, base, null); }
 
-module.exports = { ensureComfy, ensureZimage, generate, generateImage, generateH3Video, buildH3Workflow, ensureH3, zimageDefaults, h3Defaults, qilDefaults, generateQilImage, buildQilWorkflow, assemblePsd, extractImages, status, statusFor, modelMap, DEFAULT_MODELS, DEFAULT_NEGATIVE, seedModels, listLoras, runHighResFix, getMode, getUrl, baseUrl, setBackend, outputDir, lanIp, getListenAddr, configureComputeNode, UPLOAD_DIR, COMFY_DIR, PYTHON, FFMPEG_DIR, WORKFLOW_FLF, WORKFLOW_ZIMAGE, activeRuns, adoptRun, downloadOutput, syncModelPaths, selfHealBackend, generateH3Image, h3iDefaults, buildH3ImageWorkflow, H3I_REQUIRED_VERSION };
+module.exports = { ensureComfy, ensureZimage, fetchHistory, freeIfKindSwitch, generate, generateImage, generateH3Video, buildH3Workflow, ensureH3, zimageDefaults, h3Defaults, qilDefaults, generateQilImage, buildQilWorkflow, assemblePsd, extractImages, status, statusFor, modelMap, DEFAULT_MODELS, DEFAULT_NEGATIVE, seedModels, listLoras, runHighResFix, getMode, getUrl, baseUrl, setBackend, outputDir, lanIp, getListenAddr, configureComputeNode, UPLOAD_DIR, COMFY_DIR, PYTHON, FFMPEG_DIR, WORKFLOW_FLF, WORKFLOW_ZIMAGE, activeRuns, adoptRun, downloadOutput, syncModelPaths, selfHealBackend, generateH3Image, h3iDefaults, buildH3ImageWorkflow, H3I_REQUIRED_VERSION };

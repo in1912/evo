@@ -822,7 +822,7 @@
     template: `
     <div>
       <div class="page-head" style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px">
-        <div style="min-width:0"><h2>文生图Z</h2><div class="desc">Z-Image 文生图（v1.0.44 起更名「文生图Z」，与「文生图H3」并列）：Lumina2 CLIP + Flux AE + Z-Image Turbo UNet，参数在下方功能控制框内调节</div></div>
+        <div style="min-width:0"><h2>文生图Z</h2><div class="desc">Z-Image 文生图Lumina2 CLIP + Flux AE + Z-Image Turbo UNet</div></div>
         <div style="flex:none;display:flex;align-items:center;gap:12px">
           <div v-if="job || statusText" style="width:320px;max-width:38vw">
             <div class="progress"><div :style="{ width: showPct + '%', background: (job && job.status === 'failed') ? 'var(--danger)' : undefined }"></div></div>
