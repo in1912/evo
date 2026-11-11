@@ -1081,10 +1081,14 @@ function buildH3Workflow(p) {
   }
 
   // v1.0.55 人物参考图：ref2va 的参考行 —— 传参考时模型未手动指定则自动切 ref2va（fl2va 无参考行，参考会被无视）
+  // v1.0.58 根修：前端 loadDefaults 会把默认 fl2va 名透传成 model_name，击穿「未手动指定」判定 →
+  //   带参考且模型名恰为默认 fl2va（=默认值透传，非用户手选）同样切 ref2va；显式选了其它模型仍尊重不动
   const refNames = (p.refNames || []).slice(0, 3);
   const refMode = refNames.length > 0;
   const REF2VA = 'minimax_h3_ref2va_pruned_int8_convrot.safetensors';
-  const modelName = refMode && !p.modelName ? (models.h3_ref_model || REF2VA) : (p.modelName || models.h3_model || 'MiniMax-H3-fl2va-curve-Q4_0.gguf');
+  const FL2VA_DEFAULT = 'MiniMax-H3-fl2va-curve-Q4_0.gguf';
+  const isDefaultFl2va = !p.modelName || p.modelName === FL2VA_DEFAULT || p.modelName === (models.h3_model || FL2VA_DEFAULT);
+  const modelName = refMode && isDefaultFl2va ? (models.h3_ref_model || REF2VA) : (p.modelName || models.h3_model || FL2VA_DEFAULT);
   // 参考图绑定句：作者文档要求在提示词里声明 <Picture N>（未手写时自动补，手写过就不重复）
   let script = String(p.prompt || '').trim();
   if (refMode && !/<Picture/i.test(script)) {

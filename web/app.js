@@ -2601,6 +2601,8 @@
       authed, basename,
       async loadDefaults() {
         try { const d = await api('GET', '/h3/defaults'); Object.assign(this.p, d); } catch (e) {}
+        // v1.0.58：默认模型名不冒充手选（否则后端「参考图自动切 ref2va」被击穿，高级框显示也失真）
+        if (this.p.model_name === 'MiniMax-H3-fl2va-curve-Q4_0.gguf') this.p.model_name = '';
         this.sizePreset = matchH3VPreset(this.p.width, this.p.height); // 需求33：默认恰为某预设时下拉同步选中
       },
       // 需求33：常用尺寸 / 宽高互换（对齐文生图H3 机制）
@@ -2785,6 +2787,7 @@
         try { pp = JSON.parse(q.params || '{}'); } catch (e) { pp = {}; }
         for (const k of Object.keys(this.p)) if (pp[k] !== undefined) this.p[k] = pp[k];
         this.p.prompt = String(q.prompt || ''); // 提示词在独立列不在 params
+        if (this.p.model_name === 'MiniMax-H3-fl2va-curve-Q4_0.gguf') this.p.model_name = ''; // v1.0.58 同 loadDefaults：默认名不冒充手选
         this.sizePreset = matchH3VPreset(this.p.width, this.p.height); // 需求33：还原尺寸恰为某预设时下拉同步
         this.mode = pp.mode === 't2v' ? 't2v' : 'i2v';
         let note = '';
