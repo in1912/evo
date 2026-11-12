@@ -2700,6 +2700,23 @@
           参考图只决定人物长相/发型/穿着，不约束开场画面与运镜（区别于首帧）；与首帧可同时使用。参考能力是 ref2va 模型训练的：传参考会自动切 ref2va（未手动指定主模型时），不传则保持当前模型。<b>与尾帧互斥</b>：首尾帧双锚模式没有参考位，两边都设会自动清掉另一边。
         </div>
       </div>
+
+      <!-- v1.0.63 配音三件套：方案A 参考音频锚定（voice_ref，发音交给外部 TTS）/ 方案B 仅画面无声（后期合成）/ 台词规范助手在提示词卡 -->
+      <div class="card">
+        <h3>配音 <span class="muted" style="font-weight:normal;font-size:12px">（H3 原生配音对台词格式敏感——乱发音先试这里）</span></h3>
+        <div class="row" style="flex-wrap:wrap;align-items:center;gap:12px">
+          <label class="chk"><input type="checkbox" v-model="p.mute_audio" :disabled="!!voiceName" title="出无声视频，台词后期自己配音/合成（发音 100% 可控）；先移除参考音频才能勾" /> 仅画面（无声，后期配音）</label>
+          <input v-if="!p.mute_audio" type="file" accept="audio/*" @change="onVoiceFile($event)" style="max-width:320px" title="外部 TTS 生成的清唱台词音频（wav/mp3/m4a）→ H3 严格跟随它的台词/发音/语速/音色，只对口型" />
+        </div>
+        <div v-if="voiceName" style="margin-top:8px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <audio :src="voiceDataUrl" controls style="height:34px"></audio>
+          <span class="muted ellip" style="font-size:12px;max-width:260px" :title="voiceName">{{ voiceName }}</span>
+          <button class="btn sm" @click="removeVoice" title="移除参考音频（回到 H3 原生配音）">移除</button>
+        </div>
+        <div class="muted" style="margin-top:8px;font-size:12px">
+          <b>参考音频 = 发音钉死（成功率最高）</b>：用外部 TTS（剪映/豆包/本系统 TTS 页）把台词生成清唱音频，建议开头留 0.5~1 秒静音、时长≈视频时长；上传后自动切 ref2va 模型并在提示词绑定 &lt;Audio 1&gt;。<b>与尾帧互斥</b>（首尾帧双锚没有音频参考位，设尾帧会自动移除参考音频）。台词写法要点：中文单句 ≤15 字、15 秒内 ≤30 字、不中英混写、写明谁在说谁安静。
+        </div>
+      </div>
       <!-- v1.0.43 从系统选图（视频生成首帧/尾帧；文生图+广告图最近完成的生成图） -->
       <div v-if="pickOpen" class="overlay" @click.self="pickOpen = false">
         <div class="card" style="max-width:880px;width:94vw;max-height:82vh;overflow:auto">
@@ -2744,14 +2761,17 @@
       </div>
 
       <div class="card">
-        <h3>提示词（可拖拽右下角调节大小）</h3>
+        <h3>提示词（可拖拽右下角调节大小）
+          <button class="btn sm" style="margin-left:10px" @click="insertScriptTpl" title="插入三行标准台词模板（人物/台词/约束）——H3 原生配音对台词格式敏感，散写容易乱发音">台词模板</button>
+          <button class="btn sm" style="margin-left:8px" @click="appendVoiceNeg" title="在提示词末尾追加防乱发音约束句（不乱发音/不哼唱/不杂音/不吞字/语速平稳…）">配音防乱发音</button>
+        </h3>
         <textarea v-model="p.prompt" class="big-textarea" style="width:100%"></textarea>
       </div>
 
       <div class="card">
         <h3>功能控制框</h3>
         <div class="row">
-          <div class="field"><label>主模型（model_name）</label><input v-model="p.model_name" placeholder="留空 = 自动：无参考 fl2va · 带参考 ref2va" title="留空时自动选：无人物参考用 fl2va，带参考自动切 ref2va；手动填了就以你为准" /></div>
+          <div class="field"><label>主模型（model_name）</label><input v-model="p.model_name" placeholder="留空 = 自动：无参考 fl2va · 带参考 ref2va" title="留空时自动选：无人物参考用 fl2va，带参考自动切 ref2va；手动填了以你为准" /></div>
           <div class="field"><label>文本编码器（clip_name）</label><input v-model="p.clip_name" /></div>
           <div class="field"><label>CLIP 类型（clip_type）</label><input v-model="p.clip_type" /></div>
         </div>
@@ -2849,9 +2869,10 @@
         preview: '', image: '', image_ext: 'png',
         preview2: '', image2: '', image2_ext: 'png', // v1.0.48 需求29：尾帧参考图（与首帧一起 = 首尾帧模式）
         refs: [], // v1.0.55 人物参考图（≤3 张 {dataUrl, ext}，ref2va 参考行；与尾帧互斥）
+        voiceAudio: '', voiceDataUrl: '', voiceName: '', // v1.0.63 参考音频（外部 TTS 台词 → voice_ref 锚定发音；与尾帧互斥）
         pickOpen: false, pickBusy: false, pickList: [], pickTarget: 'first', // v1.0.43 从系统选图（首帧/尾帧参考图）
         pasteOpen: false, pasteTarget: 'first', pasteTitle: '', // 需求28 粘贴图片（首帧/尾帧参考图）
-        p: { prompt: '', model_name: '', clip_name: '', clip_type: 'minimax', mmproj_name: '(auto)', video_vae: '', audio_vae: '', shot_count: 1, width: 480, height: 832, frames_per_shot: 362, seed: 20260722, steps: 20, seed_per_shot: true, sampler_name: 'euler', scheduler: 'beta', self_anchor_voice: false, output_scale: 1, fps: 24, bit_depth: 'auto', color_space: 'sRGB' },
+        p: { prompt: '', model_name: '', clip_name: '', clip_type: 'minimax', mmproj_name: '(auto)', video_vae: '', audio_vae: '', shot_count: 1, width: 480, height: 832, frames_per_shot: 362, seed: 20260722, steps: 20, seed_per_shot: true, sampler_name: 'euler', scheduler: 'beta', self_anchor_voice: false, output_scale: 1, fps: 24, bit_depth: 'auto', color_space: 'sRGB', mute_audio: false },
         sizePreset: '', sizePresets: H3V_SIZE_PRESETS, // 需求33 常用尺寸 + 互换；v1.0.62 默认 480×832（32 倍数安全档，854 会 reshape 崩）
         h3Status: { running: false, url: '', device: '' },
         batchOpen: false, batchText: '', batchBusy: false, batchDone: 0, batchSep: '## 图', // 需求30 批量生成（对齐文生图Z/文生图H3）
@@ -2925,9 +2946,11 @@
         r.readAsDataURL(f);
       },
       // v1.0.55：尾帧与人物参考图互斥（首尾帧双锚无参考位）——设尾帧清参考，加参考清尾帧，都出声提醒
+      // v1.0.63：参考音频同规则（voice_ref 只在 H3MultishotSampler 上，H3Keyframes 无音频参考位）
       setEnd(dataUrl, ext) {
         this.preview2 = dataUrl; this.image2 = dataUrl; this.image2_ext = ext;
         if (this.refs.length) { this.refs = []; alert('已自动清空人物参考图：首尾帧（双锚点）模式没有参考位。清除尾帧后可重新添加参考。'); }
+        if (this.voiceName) { this.removeVoice(); alert('已自动移除参考音频：首尾帧（双锚点）模式没有音频参考位。清除尾帧后可重新上传。'); }
       },
       addRefs(list) {
         const room = 3 - this.refs.length;
@@ -2950,6 +2973,31 @@
       },
       removeRef(i) { this.refs.splice(i, 1); },
       clearRefs() { this.refs = []; },
+      // v1.0.63 参考音频：外部 TTS 清唱台词 → 后端落盘 → ComfyUI LoadAudio → H3MultishotSampler.voice_ref
+      onVoiceFile(e) {
+        const f = (e.target.files || [])[0]; e.target.value = '';
+        if (!f) return;
+        if (f.size > 20 * 1024 * 1024) { alert('参考音频不能超过 20MB（台词清唱音频一般远小于此，太长也跟不上画面）'); return; }
+        const r = new FileReader();
+        r.onload = () => {
+          if (this.image2) { this.preview2 = ''; this.image2 = ''; alert('已自动清除尾帧：参考音频与首尾帧（双锚点）模式互斥。需要尾帧请不要用参考音频。'); }
+          if (this.p.mute_audio) this.p.mute_audio = false;
+          this.voiceDataUrl = r.result;
+          this.voiceAudio = String(r.result).replace(/^data:[^,]*;base64,/, '');
+          this.voiceName = f.name;
+        };
+        r.readAsDataURL(f);
+      },
+      removeVoice() { this.voiceAudio = ''; this.voiceDataUrl = ''; this.voiceName = ''; },
+      // v1.0.63 台词规范助手：三行标准模板（H3 原生配音认这种结构，散写长句容易叽里咕噜）
+      insertScriptTpl() {
+        const tpl = '人物：年轻女性，近景面对镜头说话，口型清晰可见。\n台词：【中文】你好，欢迎来到衍像。\n（谁说：只有她一人说话，背景人物安静不出声。）\n约束：语速平稳，台词完整说完，不加语气词、不哼唱、不新增任何发音。';
+        this.p.prompt = this.p.prompt.trim() ? (this.p.prompt.trim() + '\n\n' + tpl) : tpl;
+      },
+      appendVoiceNeg() {
+        const neg = '配音约束：台词一字不差地完整说出，不乱发音、不叽里咕噜、不说无意义音节、不胡话、无杂音、不额外说话、不自动哼唱、不混语种、不吞字，语速平稳不忽快忽慢。';
+        this.p.prompt = this.p.prompt.trim() ? (this.p.prompt.trim() + '\n' + neg) : neg;
+      },
       clearStart() { this.preview = ''; this.image = ''; },
       clearEnd() { this.preview2 = ''; this.image2 = ''; },
       // v1.0.43 从系统选图：文生图+广告图最近完成的生成图 → 首帧参考图（上传功能保留不变）
@@ -3017,6 +3065,8 @@
       async submitBatch() {
         const list = this.batchList;
         if (!list.length || this.batchBusy) return;
+        // v1.0.63：参考音频不进批量（每段台词不同，一条音频无法共用；要用就逐条提交）
+        if (this.voiceName && !confirm('当前已上传参考音频：批量任务不带参考音频（每段台词不同，一条音频没法共用），各段将用 H3 原生配音。要发音钉死请逐条提交。仍要继续批量？')) return;
         // v1.0.60 软闸：批量更疯，超训练上限先确认
         if (Number(this.p.frames_per_shot) > 362 && !confirm('每镜头 ' + this.p.frames_per_shot + ' 帧已超过模型训练上限 362 帧（≈15 秒），批量提交会把算力机压到小时级。确定仍要继续？')) return;
         this.batchBusy = true; this.batchDone = 0;
@@ -3127,6 +3177,9 @@
             } catch (e) { if (!note) note = '（人物参考图取回失败：' + e.message + '，请重新添加）'; }
           }
         }
+        // v1.0.63：参考音频是临时件不随任务保留（重新生成要发音钉死就得重新上传）；mute_audio 已随 params 还原
+        this.voiceAudio = ''; this.voiceDataUrl = ''; this.voiceName = '';
+        if (pp.voice_audio) note = (note ? note + '；' : '') + '（原任务带参考音频：音频文件不随任务保留，需重新上传）';
         this.statusText = '已还原任务 #' + q.id + ' 的参数，确认后点「开始生成」' + note;
         window.scrollTo({ top: 0, behavior: 'smooth' });
       },
@@ -3144,6 +3197,10 @@
             end_image: (this.mode === 'i2v' && this.image2) ? this.image2 : undefined, end_image_ext: this.image2_ext,
             // v1.0.55 人物参考图（≤3 张；与尾帧互斥由前端自动清 + 后端拦截双保险）
             ref_images: this.refs.map((r) => ({ data: r.dataUrl, ext: r.ext })),
+            // v1.0.63 参考音频（voice_ref 锚定发音）+ 仅画面开关（与尾帧互斥同样双保险）
+            voice_audio: (this.voiceAudio && !this.p.mute_audio) ? this.voiceAudio : undefined,
+            voice_audio_ext: (this.voiceAudio && !this.p.mute_audio) ? ((this.voiceName.split('.').pop() || 'wav').toLowerCase()) : undefined,
+            mute_audio: this.p.mute_audio || undefined,
             model_name: this.p.model_name, clip_name: this.p.clip_name, clip_type: this.p.clip_type, mmproj_name: this.p.mmproj_name,
             video_vae: this.p.video_vae, audio_vae: this.p.audio_vae,
             shot_count: this.p.shot_count, width: this.p.width, height: this.p.height, frames_per_shot: this.p.frames_per_shot,

@@ -92,7 +92,7 @@ router.resume = resume;
 // ---------- 生成 ----------
 router.post('/h3/generate', (req, res) => {
   const {
-    image, image_ext, end_image, end_image_ext, ref_images, prompt, model_name, clip_name, clip_type, mmproj_name, video_vae, audio_vae,
+    image, image_ext, end_image, end_image_ext, ref_images, voice_audio, voice_audio_ext, mute_audio, prompt, model_name, clip_name, clip_type, mmproj_name, video_vae, audio_vae,
     shot_count, width, height, frames_per_shot, seed, steps, seed_per_shot, sampler_name, scheduler,
     self_anchor_voice, output_scale, fps, bit_depth, color_space,
   } = req.body || {};
@@ -105,6 +105,7 @@ router.post('/h3/generate', (req, res) => {
 
   let imagePath = '';
   let endImagePath = '';
+  let voiceAudioPath = '';
   const refPaths = []; // v1.0.55 人物参考图（≤3 张，ref2va 参考行）
   try {
     if (image) imagePath = saveImage(image, image_ext);
@@ -113,22 +114,26 @@ router.post('/h3/generate', (req, res) => {
     for (const r of (Array.isArray(ref_images) ? ref_images : []).slice(0, 3)) {
       if (r && r.data) refPaths.push(saveImage(r.data, r.ext));
     }
+    // v1.0.63 方案A：参考音频（外部 TTS 生成清唱台词 → voice_ref 钉住发音只对口型）
+    if (voice_audio) voiceAudioPath = saveImage(voice_audio, voice_audio_ext);
   } catch (e) {
     return res.status(400).json({ error: e.message });
   }
   const flf = !!(imagePath && endImagePath);
   // v1.0.55：首尾帧双锚（H3Keyframes）没有参考位，与人物参考图互斥——提前拦成人话报错
   if (flf && refPaths.length) return res.status(400).json({ error: '首尾帧（双锚点）模式不支持人物参考图：请清除尾帧（保留首帧可以）或清空人物参考图' });
+  // v1.0.63：H3Keyframes 同样没有音频参考位（voice_ref 只在 H3MultishotSampler 上）
+  if (flf && voiceAudioPath) return res.status(400).json({ error: '首尾帧（双锚点）模式不支持参考音频：请清除尾帧（保留首帧可以）或移除参考音频' });
 
   // v1.0.62 尺寸对齐：H3 引擎要求宽高为 32 的倍数（空间 token 两两配对，854//16=53 奇数直接 reshape 崩）。
   // 落库记实际生效值——队列「尺寸列」与产物一致，不再显示一个跑不了的数。
   const snap32 = (n, dft) => { const v = Math.max(32, Math.floor(Number(n) || dft)); return Math.round(v / 32) * 32; };
   const effW = snap32(width, 480), effH = snap32(height, 832);
-  const params = { model_name, clip_name, clip_type, mmproj_name, video_vae, audio_vae, shot_count, width: effW, height: effH, frames_per_shot, seed, steps, seed_per_shot, sampler_name, scheduler, self_anchor_voice, output_scale, fps, bit_depth, color_space, mode: imagePath ? (flf ? 'flf' : 'i2v') : 't2v', end_image_path: endImagePath || undefined, ref_count: refPaths.length || undefined, ref_image_paths: refPaths.length ? refPaths : undefined };
+  const params = { model_name, clip_name, clip_type, mmproj_name, video_vae, audio_vae, shot_count, width: effW, height: effH, frames_per_shot, seed, steps, seed_per_shot, sampler_name, scheduler, self_anchor_voice, output_scale, fps, bit_depth, color_space, mute_audio: mute_audio ? 1 : undefined, voice_audio: voiceAudioPath ? 1 : undefined, mode: imagePath ? (flf ? 'flf' : 'i2v') : 't2v', end_image_path: endImagePath || undefined, ref_count: refPaths.length || undefined, ref_image_paths: refPaths.length ? refPaths : undefined };
   const info = db.prepare('INSERT INTO h3_jobs(user_id, prompt, image_path, params, status) VALUES(?,?,?,?,?)')
     .run(req.user.id, String(prompt || ''), imagePath, JSON.stringify(params), 'pending');
   const jobId = Number(info.lastInsertRowid);
-  enqueue(jobId, { imagePath, endImagePath, refImages: refPaths, prompt, modelName: model_name, clipName: clip_name, clipType: clip_type, mmprojName: mmproj_name, videoVae: video_vae, audioVae: audio_vae, shotCount: shot_count, width: effW, height: effH, framesPerShot: frames_per_shot, seed, steps, seedPerShot: seed_per_shot, samplerName: sampler_name, scheduler, selfAnchorVoice: self_anchor_voice, outputScale: output_scale, fps, bitDepth: bit_depth, colorSpace: color_space });
+  enqueue(jobId, { imagePath, endImagePath, refImages: refPaths, voiceAudioPath, muteAudio: !!mute_audio, prompt, modelName: model_name, clipName: clip_name, clipType: clip_type, mmprojName: mmproj_name, videoVae: video_vae, audioVae: audio_vae, shotCount: shot_count, width: effW, height: effH, framesPerShot: frames_per_shot, seed, steps, seedPerShot: seed_per_shot, samplerName: sampler_name, scheduler, selfAnchorVoice: self_anchor_voice, outputScale: output_scale, fps, bitDepth: bit_depth, colorSpace: color_space });
   res.json({ ok: true, id: jobId });
 });
 

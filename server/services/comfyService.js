@@ -1139,9 +1139,12 @@ function buildH3Workflow(p) {
   // curve GGUF 上实测 768×448·39帧·20步 375s 出片含音频。
   // 采样按作者示例固定 res_multistep/simple（H3Keyframes 流未验证其它组合）；shot_count/multishot 参数在此模式不适用。
   // v1.0.55：人物参考图是 H3MultishotSampler 的能力，H3Keyframes 没有参考位（路由层已拦，此处兜底报人话）
+  // v1.0.63：voice_ref 同理只在 H3MultishotSampler 上——互斥检查必须放本分支内（分支末尾 return，
+  //   放外面会变死代码，单测 flf+voice 不报错就是这里抓出来的）
   if (p.inputName && p.endInputName) {
     if ((p.refNames || []).length) throw new Error('首尾帧（双锚点）模式不支持人物参考图：请清除尾帧（保留首帧可以）或清空人物参考图');
-    return {
+    if (String(p.voiceRefName || '').trim()) throw new Error('首尾帧（双锚点）模式不支持参考音频：请清除尾帧（保留首帧可以）或移除参考音频');
+    const flfWf = {
       '3': { class_type: 'H3ModelLoaderAny', inputs: { model_name: p.modelName || models.h3_model || 'MiniMax-H3-fl2va-curve-Q4_0.gguf', activation_reserve_gb: 0 } },
       '4': { class_type: 'H3ClipLoaderAny', inputs: { clip_name: p.clipName || models.h3_clip || 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors', type: p.clipType || 'minimax', mmproj_name: p.mmprojName || '(auto)' } },
       '5': { class_type: 'VAELoader', inputs: { vae_name: p.videoVae || models.h3_video_vae || 'minimax_h3_video_vae_fp16.safetensors' } },
@@ -1164,23 +1167,32 @@ function buildH3Workflow(p) {
       '8': { class_type: 'CreateVideo', inputs: { images: ['15', 0], audio: ['16', 0], fps: Number(p.fps) || 24, bit_depth: p.bitDepth || 'auto', color_space: p.colorSpace || 'sRGB' } },
       '9': { class_type: 'SaveVideo', inputs: { video: ['8', 0], filename_prefix: `video/H3_DANCE/h3_${p.jobId}`, format: 'auto' } },
     };
+    if (p.muteAudio) { delete flfWf['16']; delete flfWf['8'].inputs.audio; } // v1.0.63 仅画面（无声，后期配音）
+    return flfWf;
   }
 
   // v1.0.55 人物参考图：ref2va 的参考行 —— 传参考时模型未手动指定则自动切 ref2va（fl2va 无参考行，参考会被无视）
   // v1.0.58 根修：前端 loadDefaults 会把默认 fl2va 名透传成 model_name，击穿「未手动指定」判定 →
   //   带参考且模型名恰为默认 fl2va（=默认值透传，非用户手选）同样切 ref2va；显式选了其它模型仍尊重不动
+  // v1.0.63 参考音频（voice_ref）：节点 tooltip 明示 fl2va 未训练参考行——用音频参考同样必须 ref2va
   const refNames = (p.refNames || []).slice(0, 3);
+  const hasVoiceRef = !!String(p.voiceRefName || '').trim(); // flf 互斥已在 flf 分支内拦（此处到不了双锚组合）
   const refMode = refNames.length > 0;
   const REF2VA = 'minimax_h3_ref2va_pruned_int8_convrot.safetensors';
   const FL2VA_DEFAULT = 'MiniMax-H3-fl2va-curve-Q4_0.gguf';
   const isDefaultFl2va = !p.modelName || p.modelName === FL2VA_DEFAULT || p.modelName === (models.h3_model || FL2VA_DEFAULT);
-  const modelName = refMode && isDefaultFl2va ? (models.h3_ref_model || REF2VA) : (p.modelName || models.h3_model || FL2VA_DEFAULT);
+  const modelName = (refMode || hasVoiceRef) && isDefaultFl2va ? (models.h3_ref_model || REF2VA) : (p.modelName || models.h3_model || FL2VA_DEFAULT);
   // 参考图绑定句：作者文档要求在提示词里声明 <Picture N>（未手写时自动补，手写过就不重复）
   let script = String(p.prompt || '').trim();
   if (refMode && !/<Picture/i.test(script)) {
     script += refNames.length === 1
       ? '\n人物参考：<Picture 1> 是主角的参考照片，画面中主要人物的长相、发型与穿着以该照片为准。'
       : `\n人物参考：<Picture 1> 到 <Picture ${refNames.length}> 是同一主角的参考照片，画面中主要人物的长相、发型与穿着以这些照片为准。`;
+  }
+  // v1.0.63 配音锚定句（节点 tooltip 原文 "Her voice is the voice in <Audio 1>"）：参考音频=发音交给外部 TTS，
+  // H3 只对口型——治「乱发音/叽里咕噜」成功率最高的方式；用户手写过 <Audio> 就不重复补
+  if (hasVoiceRef && !/<Audio/i.test(script)) {
+    script += '\n配音锚定：主角的声音就是 <Audio 1> 参考音频里的声音——严格跟随参考音频的台词、发音、语速与音色，口型与音频逐帧对齐，不新增任何发音、不乱加音节、无哼唱无杂音。';
   }
   const wf = {
     '3': { class_type: 'H3ModelLoaderAny', inputs: { model_name: modelName, activation_reserve_gb: 0 } },
@@ -1203,9 +1215,14 @@ function buildH3Workflow(p) {
       output_scale: Number(p.outputScale) || 1.0,
       save_every_shot: false,
     } },
-    '8': { class_type: 'CreateVideo', inputs: { images: ['7', 0], audio: ['7', 1], fps: Number(p.fps) || 24, bit_depth: p.bitDepth || 'auto', color_space: p.colorSpace || 'sRGB' } },
+    '8': { class_type: 'CreateVideo', inputs: { images: ['7', 0], ...(p.muteAudio ? {} : { audio: ['7', 1] }), fps: Number(p.fps) || 24, bit_depth: p.bitDepth || 'auto', color_space: p.colorSpace || 'sRGB' } },
     '9': { class_type: 'SaveVideo', inputs: { video: ['8', 0], filename_prefix: `video/H3_DANCE/h3_${p.jobId}`, format: 'auto' } },
   };
+  // v1.0.63 参考音频（voice_ref）：LoadAudio → H3MultishotSampler.voice_ref——发音交给外部 TTS，H3 只对口型
+  if (hasVoiceRef) {
+    wf['va'] = { class_type: 'LoadAudio', inputs: { audio: String(p.voiceRefName).trim() } };
+    wf['7'].inputs.voice_ref = ['va', 0];
+  }
   if (p.inputName) {
     wf['2'] = { class_type: 'LoadImage', inputs: { image: p.inputName } };
     wf['7'].inputs.start_image = ['2', 0];
@@ -1788,7 +1805,7 @@ async function generateQilImage({ prompt, negativePrompt, clipName, clipType, cl
 }
 
 // ---------- MiniMax-H3 图生视频 / 文生视频 生成 ----------
-async function generateH3Video({ imagePath, endImagePath, refImages, prompt, modelName, clipName, clipType, mmprojName, videoVae, audioVae, shotCount, width, height, framesPerShot, seed, steps, seedPerShot, samplerName, scheduler, selfAnchorVoice, outputScale, fps, bitDepth, colorSpace }, onProgress, taskRef) {
+async function generateH3Video({ imagePath, endImagePath, refImages, voiceAudioPath, muteAudio, prompt, modelName, clipName, clipType, mmprojName, videoVae, audioVae, shotCount, width, height, framesPerShot, seed, steps, seedPerShot, samplerName, scheduler, selfAnchorVoice, outputScale, fps, bitDepth, colorSpace }, onProgress, taskRef) {
   const prog = (s, pct) => { if (typeof onProgress === 'function') onProgress(s, pct); };
   prog('检查 H3 后端…', 5);
   await ensureH3();
@@ -1825,9 +1842,19 @@ async function generateH3Video({ imagePath, endImagePath, refImages, prompt, mod
     }
     if (!modelName) prog('使用人物参考模型 ref2va（' + (models.h3_ref_model || 'minimax_h3_ref2va_pruned_int8_convrot.safetensors') + '）', 22);
   }
+  // v1.0.63 参考音频：外部 TTS 生成的清唱台词 → H3MultishotSampler.voice_ref（发音钉住，只对口型）
+  let voiceRefName = '';
+  if (voiceAudioPath) {
+    if (endInputName) throw new Error('首尾帧（双锚点）模式不支持参考音频：请清除尾帧（保留首帧可以）或移除参考音频');
+    const ext = (path.extname(voiceAudioPath).toLowerCase() || '.wav').replace('.', '');
+    voiceRefName = `h3va_${jobId}.${ext || 'wav'}`;
+    prog('上传参考音频…', 21);
+    await placeInputTo(voiceAudioPath, voiceRefName, base, null);
+    if (!modelName || modelName === 'MiniMax-H3-fl2va-curve-Q4_0.gguf') prog('使用参考音频：自动切 ref2va 模型（fl2va 未训练音频参考行）', 22);
+  }
 
   prog('组装工作流…', 22);
-  const wf = buildH3Workflow({ inputName, endInputName, refNames, prompt, modelName, clipName, clipType, mmprojName, videoVae, audioVae, shotCount, width, height, framesPerShot, seed, steps, seedPerShot, samplerName, scheduler, selfAnchorVoice, outputScale, fps, bitDepth, colorSpace, models, jobId });
+  const wf = buildH3Workflow({ inputName, endInputName, refNames, voiceRefName, muteAudio: !!muteAudio, prompt, modelName, clipName, clipType, mmprojName, videoVae, audioVae, shotCount, width, height, framesPerShot, seed, steps, seedPerShot, samplerName, scheduler, selfAnchorVoice, outputScale, fps, bitDepth, colorSpace, models, jobId });
 
   prog('提交 ComfyUI…', 25);
   const mon = progressMonitor(base);
