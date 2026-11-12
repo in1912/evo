@@ -2612,10 +2612,12 @@
   };
 
   // ---------- 视频生成（MiniMax-H3：图生视频 / 文生视频） ----------
-  // 需求33 生视频H3 常用尺寸：文生图H3 现有预设全量 + 480P/360P 两个视频档（引擎 latent 按 //16 对齐，854/360 照填即可）
+  // 需求33 生视频H3 常用尺寸：文生图H3 现有预设全量 + 480P/360P 两个视频档
+  // v1.0.62 根修：引擎要求宽高为 32 的倍数（token 两两配对）——854/360 非 32 倍数会 reshape 崩，预设改安全档
+  //（非 32 倍数的尺寸如 960×540/1920×1080 后端会自动 snap 到最近 32 倍数，落库记实际生效值）
   const H3V_SIZE_PRESETS = SIZE_PRESETS.concat([
-    { v: '854x480', label: '854×480（480P）' },
-    { v: '640x360', label: '640×360（360P）' },
+    { v: '832x480', label: '832×480（480P 横版）' },
+    { v: '640x352', label: '640×352（360P）' },
   ]);
   const matchH3VPreset = (w, h) => { const k = Number(w) + 'x' + Number(h); return H3V_SIZE_PRESETS.some((s) => s.v === k) ? k : ''; };
 
@@ -2849,8 +2851,8 @@
         refs: [], // v1.0.55 人物参考图（≤3 张 {dataUrl, ext}，ref2va 参考行；与尾帧互斥）
         pickOpen: false, pickBusy: false, pickList: [], pickTarget: 'first', // v1.0.43 从系统选图（首帧/尾帧参考图）
         pasteOpen: false, pasteTarget: 'first', pasteTitle: '', // 需求28 粘贴图片（首帧/尾帧参考图）
-        p: { prompt: '', model_name: '', clip_name: '', clip_type: 'minimax', mmproj_name: '(auto)', video_vae: '', audio_vae: '', shot_count: 1, width: 480, height: 854, frames_per_shot: 362, seed: 20260722, steps: 20, seed_per_shot: true, sampler_name: 'euler', scheduler: 'beta', self_anchor_voice: false, output_scale: 1, fps: 24, bit_depth: 'auto', color_space: 'sRGB' },
-        sizePreset: '', sizePresets: H3V_SIZE_PRESETS, // 需求33 常用尺寸 + 互换（对齐文生图H3；默认 480×854 不在预设内 → 下拉显示「手动输入」）
+        p: { prompt: '', model_name: '', clip_name: '', clip_type: 'minimax', mmproj_name: '(auto)', video_vae: '', audio_vae: '', shot_count: 1, width: 480, height: 832, frames_per_shot: 362, seed: 20260722, steps: 20, seed_per_shot: true, sampler_name: 'euler', scheduler: 'beta', self_anchor_voice: false, output_scale: 1, fps: 24, bit_depth: 'auto', color_space: 'sRGB' },
+        sizePreset: '', sizePresets: H3V_SIZE_PRESETS, // 需求33 常用尺寸 + 互换；v1.0.62 默认 480×832（32 倍数安全档，854 会 reshape 崩）
         h3Status: { running: false, url: '', device: '' },
         batchOpen: false, batchText: '', batchBusy: false, batchDone: 0, batchSep: '## 图', // 需求30 批量生成（对齐文生图Z/文生图H3）
         busy: false, statusText: '', job: null, timer: null,

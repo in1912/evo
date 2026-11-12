@@ -1118,7 +1118,7 @@ function h3Defaults() {
     model_name: 'MiniMax-H3-fl2va-curve-Q4_0.gguf',
     clip_name: 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors', clip_type: 'minimax', mmproj_name: '(auto)',
     video_vae: 'minimax_h3_video_vae_fp16.safetensors', audio_vae: 'minimax_h3_audio_vae_fp32.safetensors',
-    shot_count: 1, width: 480, height: 854, frames_per_shot: 362, // 需求33 默认 480×854（引擎 latent //16 对齐，非 16 倍数照填不报错）
+    shot_count: 1, width: 480, height: 832, frames_per_shot: 362, // v1.0.62 默认 480×832（32 倍数=token 配对安全档；854 非法，见 buildH3Workflow 注释）
     seed: 20260722, steps: 20, seed_per_shot: true, sampler_name: 'euler', scheduler: 'beta',
     self_anchor_voice: false, output_scale: 1, fps: 24, bit_depth: 'auto', color_space: 'sRGB',
   };
@@ -1128,8 +1128,11 @@ function h3Defaults() {
 function buildH3Workflow(p) {
   const models = p.models || {};
   const seedNum = (p.seed === undefined || p.seed === null || p.seed === '' || Number(p.seed) < 0) ? Math.floor(Math.random() * 1e15) : Number(p.seed);
-  const W = Math.max(32, Math.floor(Number(p.width) || 480));
-  const H = Math.max(32, Math.floor(Number(p.height) || 854));
+  // v1.0.62 根修：引擎注意力把空间 token 两两配对 —— H（或 W）//16 必须为偶数 ⟺ 边长是 32 的倍数。
+  // 生产实锤：480×854 → 854//16=53 奇数 token，reshape '[1,24,1,1,26,2,15,2]' invalid for 38160 直接崩
+  //（24×53×30=38160 ≠ 24×52×30=37440）；而 480×832（52 偶）39~362 帧六连全成。540/1080/3440 等非 32 倍数同雷。
+  const snap32 = (n, dft) => { const v = Math.max(32, Math.floor(Number(n) || dft)); return Math.round(v / 32) * 32; };
+  const W = snap32(p.width, 480), H = snap32(p.height, 832);
   const steps = Math.max(1, Math.min(50, Math.floor(Number(p.steps) || 20)));
 
   // v1.0.48 需求29：首尾帧模式 —— 官方 H3Keyframes 配方（positions 0%/100% 双锚点），
