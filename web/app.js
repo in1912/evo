@@ -936,7 +936,7 @@
     template: `
     <div>
       <div class="page-head" style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px">
-        <div style="min-width:0"><h2>文生图Z</h2><div class="desc">Z-Image 文生图Lumina2 CLIP + Flux AE + Z-Image Turbo UNet</div></div>
+        <div style="min-width:0"><h2>文生图Z</h2><div class="desc">Z-Image 家族：Turbo 极速文生图 · Edit 指令修图（FP8）· 性能说明</div></div>
         <div style="flex:none;display:flex;align-items:center;gap:12px">
           <div v-if="job || statusText" style="width:320px;max-width:38vw">
             <div class="progress"><div :style="{ width: showPct + '%', background: (job && job.status === 'failed') ? 'var(--danger)' : undefined }"></div></div>
@@ -945,13 +945,20 @@
             </div>
           </div>
           <button class="btn primary" :disabled="busy" @click="go">{{ busy ? '生成中' : '开始生成' }}</button>
-          <button class="btn" :disabled="busy || batchBusy" @click="openBatch" title="粘贴多段提示词（每段以「## 图1」标题行分隔），一键批量提交多个任务排队执行">批量生成</button>
+          <button v-if="tab==='turbo'" class="btn" :disabled="busy || batchBusy" @click="openBatch" title="粘贴多段提示词（每段以「## 图1」标题行分隔），一键批量提交多个任务排队执行">批量生成</button>
           <button v-if="busy" class="btn danger" @click="stopJob" title="停止当前任务（排队中的直接出队，执行中的安全打断）">停止</button>
         </div>
       </div>
       <div v-if="job && job.error" class="alert err" style="margin-bottom:12px">{{ job.error }}</div>
 
-      <div class="card">
+      <!-- v1.0.61 需求34：三页签——Turbo 生图（原有）/ Edit 图生图（新增）/ 性能说明（需求38） -->
+      <div class="row" style="gap:8px;margin-bottom:12px;flex:none;flex-wrap:wrap">
+        <button :class="['btn','sm',{primary: tab==='turbo'}]" @click="tab='turbo'">Z-Image Turbo生图</button>
+        <button :class="['btn','sm',{primary: tab==='edit'}]" @click="tab='edit'">Z-Image Edit图生图</button>
+        <button :class="['btn','sm',{primary: tab==='perf'}]" @click="tab='perf'">性能说明</button>
+      </div>
+
+      <div v-if="tab==='turbo'" class="card">
         <h3 style="margin:0 0 12px">功能控制框</h3>
         <div class="grid-2">
           <div class="field"><label>正向提示词（必填）</label><textarea v-model="p.prompt" style="min-height:140px"></textarea></div>
@@ -1086,6 +1093,151 @@
         </div>
       </div>
 
+      <!-- v1.0.61 需求35-37：Z-Image Edit 图生图（参数框复刻 Turbo + 参考图三路入口 + 尺寸件复刻） -->
+      <div v-else-if="tab==='edit'" class="card">
+        <h3 style="margin:0 0 12px">Z-Image Edit 图生图（指令修图）</h3>
+        <div class="alert" style="margin:0 0 12px;padding:8px 12px;font-size:12px;line-height:1.7">
+          <b>显存说明（需求36）</b>：跑 Edit 时会<b>同时加载 Qwen3（文本）+ SigLIP2（视觉）+ Edit DiT + VAE</b>，比 Turbo 多一个 SigLIP2 常驻显存开销，所以必须 <b>FP8 权重 + 适当 offload</b>。3060 12G 建议 1024 档（1280 容易爆显存）；提示词写「怎么改」而不是「画什么」，例如：把外套改成深蓝色，其余保持不变。
+        </div>
+        <div class="grid-2">
+          <div class="field"><label>正向提示词（编辑指令：说明怎么改参考图）</label><textarea v-model="ep.prompt" style="min-height:140px"></textarea></div>
+          <div class="field"><label>负向提示词（Edit 支持 CFG 与负面提示词）</label><textarea v-model="ep.negative" style="min-height:140px"></textarea></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>Edit 主模型（unet_name）</label><input v-model="ep.unet_name" placeholder="留空 = 自动：识别 diffusion_models 下 zimage_edit / z_image_edit 文件" title="官方权重未发布；放置社区 FP8 包后留空自动识别，或手动填文件名" /></div>
+          <div class="field"><label>SigLIP2 视觉编码器（clip_vision）</label><input v-model="ep.clip_vision_name" placeholder="留空 = 自动：识别 clip_vision 下 siglip 文件" title="Edit 专用视觉编码器（FP8）；缺失时走 reference_latents 通道（效果可能打折）" /></div>
+          <div class="field"><label>UNet 数据类型（weight_dtype）</label>
+            <select v-model="ep.weight_dtype"><option>default</option><option>fp8_e4m3fn</option><option>fp8_e5m2</option><option>fp16</option><option>bf16</option></select>
+          </div>
+        </div>
+        <div class="row">
+          <div class="field"><label>图像宽度（width）</label><input type="number" v-model.number="ep.width" min="64" /></div>
+          <div class="field"><label>图像高度（height）</label><input type="number" v-model.number="ep.height" min="64" /></div>
+          <div class="field" style="min-width:0;flex:none;display:flex;align-items:flex-end;padding-bottom:4px">
+            <button class="btn sm" @click="eSwapSize" title="宽高互换（横竖版切换）">⇄ 互换</button>
+          </div>
+          <div class="field" style="min-width:0;flex:none;display:flex;align-items:flex-end;padding-bottom:4px">
+            <label class="chk" style="display:flex;align-items:center;gap:6px;white-space:nowrap">尺寸
+              <select v-model="eSizePreset" @change="eApplyPreset">
+                <option value="">常用尺寸</option>
+                <option v-for="s in sizePresets" :key="s.v" :value="s.v">{{ s.label }}</option>
+              </select>
+            </label>
+          </div>
+          <div class="field" style="min-width:0;flex:none;display:flex;align-items:flex-end;padding-bottom:4px">
+            <label class="chk" style="display:flex;align-items:center;gap:6px;white-space:nowrap">锁定比例
+              <select v-model="eRatioLock" @change="eOnRatioLock">
+                <option value="">不锁定</option>
+                <option value="16:9">16:9</option>
+                <option value="4:3">4:3</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <div class="row">
+          <div class="field"><label>种子（-1 随机）</label><input v-model="ep.seed" /></div>
+          <div class="field"><label>生成控制（control_after_generate）</label>
+            <select v-model="ep.control_after_generate"><option>randomize</option><option>fixed</option><option>increment</option><option>decrement</option></select>
+          </div>
+          <div class="field"><label>步数（steps，建议 16-28）</label><input type="number" v-model.number="ep.steps" min="1" /></div>
+          <div class="field"><label>CFG（建议 3.0-5.0）</label><input type="number" v-model.number="ep.cfg" step="0.1" /></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>采样器（sampler_name）</label><input v-model="ep.sampler_name" /></div>
+          <div class="field"><label>调度器（scheduler）</label><input v-model="ep.scheduler" /></div>
+          <div class="field"><label>采样移位（shift）</label><input type="number" v-model.number="ep.shift" step="0.01" /></div>
+          <div class="field"><label>重绘幅度（denoise）</label><input value="1.0（Edit 专用：指令重画整图，固定 1.0）" disabled title="TextEncodeZImageOmni 走指令重画通道，denoise 固定 1.0，不可调" /></div>
+        </div>
+
+        <h3 style="margin:18px 0 8px">参考图 <span class="muted" style="font-weight:400;font-size:12px">（图1 = 要编辑的原图，必填；图2/图3 可选补充参考；节点最多 3 张）</span></h3>
+        <div class="row" style="align-items:center;gap:10px;flex-wrap:wrap">
+          <div v-for="(r, i) in editRefs" :key="i" style="position:relative;width:86px;height:86px;border:1px solid rgba(128,128,128,.35);border-radius:8px;overflow:hidden;flex:none">
+            <img :src="r.dataUrl" style="width:100%;height:100%;object-fit:cover;cursor:zoom-in" @click="zoomEditRef(i)" :title="r.name" />
+            <button class="btn sm" style="position:absolute;top:2px;right:2px;padding:0 6px;line-height:20px" @click="rmEditRef(i)" title="移除这张图">×</button>
+            <div style="position:absolute;left:0;bottom:0;right:0;background:rgba(0,0,0,.55);color:#fff;font-size:11px;text-align:center">{{ i === 0 ? '原图' : '参考' + (i + 1) }}</div>
+          </div>
+          <button class="btn sm" @click="$refs.editFile.click()">上传图片</button>
+          <input ref="editFile" type="file" accept="image/*" multiple style="display:none" @change="onEditFiles" />
+          <button class="btn sm" @click="loadEditPick">从系统选图</button>
+          <button class="btn sm" @click="editPasteOpen = true" title="粘贴剪贴板图片（Ctrl+V，可多张）">粘贴图片</button>
+          <span v-if="!editRefs.length" class="muted" style="font-size:12px">未选择参考图（图1 = 要编辑的原图，必填）</span>
+        </div>
+
+        <div v-if="editPickOpen" class="overlay" @click.self="editPickOpen = false">
+          <div class="card" style="max-width:880px;width:94vw;max-height:82vh;overflow:auto">
+            <h3 style="margin:0 0 10px">从系统选图（追加到空位，最多 3 张）</h3>
+            <div v-if="editPickBusy" style="padding:24px;text-align:center;opacity:.7">加载中…</div>
+            <div v-else-if="!editPickList.length" style="padding:24px;text-align:center;opacity:.7">还没有已完成的生成图</div>
+            <div v-else style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px">
+              <div v-for="it in editPickList" :key="it.id" title="点选此图" style="cursor:pointer;border:1px solid rgba(128,128,128,.35);border-radius:8px;padding:6px;text-align:center" @click="editPickOne(it)">
+                <img :src="it.url" style="width:100%;height:92px;object-fit:cover;border-radius:4px" />
+                <div style="font-size:12px;margin-top:4px">{{ it.src }} {{ it.wh }}</div>
+                <div style="font-size:11px;opacity:.6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ it.prompt || it.file }}</div>
+              </div>
+            </div>
+            <div style="margin-top:12px;text-align:right"><button class="btn sm" @click="editPickOpen = false">取消</button></div>
+          </div>
+        </div>
+        <PasteDlg v-if="editPasteOpen" title="粘贴图片（Edit 参考图，可多张）" :multi="true" @confirm="onEditPasteConfirm" @close="editPasteOpen = false" />
+      </div>
+
+      <!-- v1.0.61 需求38：性能说明（Turbo/Base/Edit 对比 + 四档显卡 + 模型来源与放置目录） -->
+      <div v-else class="card">
+        <h3 style="margin:0 0 12px">性能说明（Z-Image 家族三模型对比）</h3>
+        <div style="overflow:auto">
+          <table class="tbl">
+            <thead><tr><th>项目</th><th>Z-Image Turbo</th><th>Z-Image Base</th><th>Z-Image Edit</th></tr></thead>
+            <tbody>
+              <tr><td>定位</td><td>蒸馏极速文生图</td><td>原生基础底座，专业出图 + 炼丹</td><td>图像编辑专用（指令式修图）</td></tr>
+              <tr><td>步数</td><td>固定 8 步</td><td>28–50 步</td><td>一般 16–28 步</td></tr>
+              <tr><td>CFG / 负面提示词</td><td>✕ 不支持、CFG 固定≈1</td><td>✓ 完整支持 CFG、负面 prompt</td><td>✓ 支持 CFG、负面</td></tr>
+              <tr><td>多样性</td><td>低，同提示词结果很稳</td><td>高，每次抽卡变化大</td><td>中等，优先保留原图结构、人脸、身份</td></tr>
+              <tr><td>LoRA / ControlNet</td><td>不推荐训练，兼容性差</td><td>✓ 官方推荐炼丹、训 LoRA、ControlNet</td><td>不适合训 LoRA，用来改图</td></tr>
+              <tr><td>强项</td><td>快速草稿、批量小样、8 步秒出</td><td>复杂光影、精细材质、可控性强、最终成品</td><td>听懂人话改图：换颜色、改衣服、局部重绘、扩图，不容易把人改崩</td></tr>
+              <tr><td>短板</td><td>不能用负面，可控手段少</td><td>慢，比 Turbo 慢很多</td><td>不是用来从零文生图的，强行文生图效果一般</td></tr>
+              <tr><td>显存构成</td><td>Qwen3 + Turbo DiT + VAE</td><td>Qwen3 + Base DiT + VAE</td><td>Qwen3 + <b>SigLIP2</b> + Edit DiT + VAE（多一个 SigLIP2 常驻开销 → 必须 FP8 + offload）</td></tr>
+              <tr><td>发布状态（2026-11）</td><td>已开源</td><td>已开源（2026-01-27）</td><td><b>官方权重未发布</b>（Tongyi-MAI 仓库标「To be released」；ComfyUI 0.45 已内置 TextEncodeZImageOmni 节点待命）</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 style="margin:18px 0 8px">四档显卡 · 工作流搭配与建议</h3>
+        <div style="overflow:auto">
+          <table class="tbl">
+            <thead><tr><th>显卡</th><th>Turbo（8 步）</th><th>Base（28–50 步 + CFG）</th><th>Edit FP8 + SigLIP2（16–28 步）</th><th>建议与场景</th></tr></thead>
+            <tbody>
+              <tr><td><b>3060 12G</b>（本机算力端）</td><td>bf16 全速：2560×1440 常用（已实证）</td><td>bf16 12.3G 文件装得下但显存紧 → 建议 <b>int8_convrot（6.2G）</b>，1024–1280 档、28 步起步</td><td><b>必须 FP8 + offload</b>；1024 档稳、1280 容易爆显存</td><td>日常出图主力：Turbo 打草稿，Edit 修图；Base 出成品要有耐心（约 Turbo 7–12 倍耗时）</td></tr>
+              <tr><td><b>2080 22G</b>（Turing）</td><td>bf16 全档（2048 档可）</td><td>bf16 直跑 2048×2048 + 40–50 步</td><td>FP8 权重<b>能载但无 FP8 硬件加速</b>（Turing 回退仿真），速度无优势——建议 bf16 权重 + offload</td><td>大显存低算力：适合跑 Base 高步数慢出细活，不适合追 Edit 速度</td></tr>
+              <tr><td><b>5070 16G</b>（Blackwell）</td><td>bf16 全档秒出</td><td>bf16 / int8 均可，1280 档稳</td><td>FP8 硬件加速 + SigLIP2 fp8：1024 稳、1280 可试</td><td>速度与显存均衡：全家的日用甜点档</td></tr>
+              <tr><td><b>5090 32G</b></td><td>bf16 任意尺寸</td><td>bf16 直跑 2048×2048 + 50 步、可叠 LoRA / ControlNet</td><td>FP8 全档（1536 档可），SigLIP2 可用原精度</td><td>批量炼丹 / 最终成品 / 多任务并跑</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 style="margin:18px 0 8px">模型与子模型来源、镜像下载、放置目录</h3>
+        <div style="overflow:auto">
+          <table class="tbl">
+            <thead><tr><th>文件</th><th>作用 / 大小</th><th>状态</th><th>来源与镜像（hf-mirror 为国内镜像，逐条 HEAD 可验）</th><th>放置目录（ComfyUI/models/ 下）</th></tr></thead>
+            <tbody>
+              <tr><td>qwen_3_4b.safetensors</td><td>Qwen3-4B 文本编码器 / 8.04GB</td><td>✅ 已装</td><td>hf-mirror.com/Comfy-Org/Z-Image-Turbo/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors</td><td>text_encoders/</td></tr>
+              <tr><td>ae.safetensors</td><td>AE VAE / 0.34GB</td><td>✅ 已装</td><td>hf-mirror.com/Comfy-Org/Z-Image-Turbo/resolve/main/split_files/vae/ae.safetensors</td><td>vae/</td></tr>
+              <tr><td>z_image_turbo_bf16.safetensors</td><td>Turbo DiT / 12.31GB</td><td>✅ 已装</td><td>hf-mirror.com/Comfy-Org/Z-Image-Turbo/resolve/main/split_files/diffusion_models/z_image_turbo_bf16.safetensors</td><td>diffusion_models/</td></tr>
+              <tr><td>z_image_bf16.safetensors</td><td>Base DiT（可选）/ 12.31GB</td><td>未装</td><td>hf-mirror.com/Comfy-Org/Z-Image/resolve/main/split_files/diffusion_models/z_image_bf16.safetensors</td><td>diffusion_models/</td></tr>
+              <tr><td>z_image_int8_convrot.safetensors</td><td>Base int8（12G 卡推荐）/ 6.20GB</td><td>未装</td><td>hf-mirror.com/Comfy-Org/Z-Image/resolve/main/split_files/diffusion_models/z_image_int8_convrot.safetensors</td><td>diffusion_models/</td></tr>
+              <tr><td>qwen_3_4b_fp8_mixed.safetensors</td><td>文本编码器 FP8（省显存可选）/ 5.63GB</td><td>未装</td><td>hf-mirror.com/Comfy-Org/Z-Image/resolve/main/split_files/text_encoders/qwen_3_4b_fp8_mixed.safetensors</td><td>text_encoders/</td></tr>
+              <tr><td>zimage_edit_fp8.safetensors（命名不固定，z_image_edit* 均可自动识别）</td><td>Edit DiT FP8 / 约 6–7GB</td><td><b>官方未发布</b></td><td>社区渠道：Civitai / Tensor.Art 搜「Z-Image Edit FP8」（优先选 ComfyUI ready、附带 siglip2 的包；<b>勿下 AIO 大包</b>——重复带 Qwen+VAE 浪费空间）。官方发布后 Tongyi-MAI/Z-Image 仓库即权威来源</td><td>diffusion_models/</td></tr>
+              <tr><td>siglip2_fp8.safetensors（siglip2* 均可自动识别）</td><td>Edit 专用 SigLIP2 视觉编码器 / 约 1–2GB</td><td><b>官方未发布</b></td><td>同上（一般随 Edit 社区包一起分发）</td><td>clip_vision/</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="muted" style="font-size:12px;margin-top:10px;line-height:1.8">
+          · 文本编码器（qwen_3_4b）与 VAE（ae）Turbo / Base / Edit 三模型共用，装一套即可，不重复下载。<br />
+          · 社区 FP8 包没有官方 hash 校验：下载后先小尺寸试跑，参考评论区反馈再批量用。<br />
+          · Edit 只用于指令修图 / 局部重绘 / 扩图——不要拿来从零文生图（效果差，从零生图请用 Turbo 页签）。<br />
+          · 官方发布动态看 github.com/Tongyi-MAI/Z-Image 的 News 区；发布后模型页「拉取」会收录官方直链。
+        </div>
+      </div>
+
       <div class="card" style="margin-top:16px">
         <h3>最近生成图
           <button class="btn sm" style="margin-left:10px" @click="openFolder">打开文件夹</button>
@@ -1149,6 +1301,13 @@
         busy: false, statusText: '', job: null, timer: null,
         queue: [], qTimer: null, stripPage: 0, stripSize: 10, qPage: 0, qPageSize: 10,
         pctHigh: 0,
+        // v1.0.61 需求34-38：Z-Image 三页签（turbo=Turbo生图 / edit=Edit图生图 / perf=性能说明）
+        tab: 'turbo',
+        // 需求35：ep 完全复刻 Turbo 填写框（Edit 专用默认值：20 步 / CFG 4 / 1024 / denoise 固定 1.0）
+        ep: { prompt: '', negative: '', width: 1024, height: 1024, steps: 20, cfg: 4.0, seed: -1, control_after_generate: 'randomize', denoise: 1.0, shift: 3.0, sampler_name: 'res_multistep', scheduler: 'simple', unet_name: '', clip_vision_name: '', weight_dtype: 'default' },
+        editRefs: [], // 需求35 参考图（图1=要编辑的原图必填；最多 3 张=TextEncodeZImageOmni 节点 image1..3 上限）
+        editPasteOpen: false, editPickOpen: false, editPickBusy: false, editPickList: [],
+        eSizePreset: '', eRatioLock: '', eRatio: 0, // 需求37 Edit 版尺寸件（互换/常用尺寸/锁定比例与 Turbo 同款）
       };
     },
     computed: {
@@ -1190,9 +1349,13 @@
       // 就已复位 → 高度反算宽度形成回声环，输入的值被改掉（实测输 1 显 2、输 1920 显 2830）
       'p.width': { flush: 'sync', handler(v) { if (this._syncing) return; this.sizePreset = ''; /* 手动输入即脱离尺寸预设 */ if (this.ratioLock && this.ratio && Number(v) > 0) { this._syncing = true; this.p.height = Math.round(Number(v) / this.ratio); this._syncing = false; } } },
       'p.height': { flush: 'sync', handler(v) { if (this._syncing) return; this.sizePreset = ''; if (this.ratioLock && this.ratio && Number(v) > 0) { this._syncing = true; this.p.width = Math.round(Number(v) * this.ratio); this._syncing = false; } } },
+      // 需求37：Edit 页签同款宽高互锁（独立 eSizePreset/eRatioLock，与 Turbo 互不干扰）
+      'ep.width': { flush: 'sync', handler(v) { if (this._syncing) return; this.eSizePreset = ''; if (this.eRatioLock && this.eRatio && Number(v) > 0) { this._syncing = true; this.ep.height = Math.round(Number(v) / this.eRatio); this._syncing = false; } } },
+      'ep.height': { flush: 'sync', handler(v) { if (this._syncing) return; this.eSizePreset = ''; if (this.eRatioLock && this.eRatio && Number(v) > 0) { this._syncing = true; this.ep.width = Math.round(Number(v) * this.eRatio); this._syncing = false; } } },
     },
     async mounted() {
       this.loadDefaults();
+      this.loadEditDefaults(); // 需求34：Edit 页签默认值（后端 /image/zedit-defaults）
       this.refreshQueue();
       this.qTimer = setInterval(() => this.refreshQueue(), 3000);
     },
@@ -1229,6 +1392,25 @@
         // 再生成：把该任务落库的参数整体还原进上方参数框，等用户自己点「开始生成」（不自动提交）
         let pp = {};
         try { pp = JSON.parse(q.params || '{}'); } catch (e) { alert('该任务参数无法解析'); return; }
+        if (pp.gen_mode === 'edit') {
+          // v1.0.61：Edit 任务还原进 Edit 页签（参考图不落库，需重新选择）
+          this.tab = 'edit';
+          this._syncing = true;
+          for (const k of Object.keys(this.ep)) if (pp[k] !== undefined) this.ep[k] = pp[k];
+          this._syncing = false;
+          this.ep.prompt = String(q.prompt || '');
+          this.ep.negative = String(q.negative_prompt || '');
+          const w = Number(this.ep.width) || 0, h = Number(this.ep.height) || 0;
+          if (w > 0 && h > 0) {
+            const r = w / h;
+            this.eRatioLock = Math.abs(r - 16 / 9) < 0.02 ? '16:9' : Math.abs(r - 4 / 3) < 0.02 ? '4:3' : '';
+            this.eRatio = this.eRatioLock === '16:9' ? 16 / 9 : this.eRatioLock === '4:3' ? 4 / 3 : 0;
+          }
+          this.eSizePreset = matchPreset(w, h);
+          this.statusText = '已还原任务 #' + q.id + ' 的参数（Edit 模式参考图不落库，需重新上传原图）';
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+          return;
+        }
         this._syncing = true; // 整体写回：不让宽高互锁中途重算
         for (const k of Object.keys(this.p)) if (pp[k] !== undefined) this.p[k] = pp[k];
         this._syncing = false;
@@ -1405,7 +1587,119 @@
         this.p.negative = cur ? cur.replace(/[，,]\s*$/, '') + '，' + list : list;
       },
       clearNeg() { this.p.negative = ''; },
+      // ---------- v1.0.61 需求34-37：Z-Image Edit 页签 ----------
+      async loadEditDefaults() {
+        try {
+          const d = await api('GET', '/image/zedit-defaults');
+          for (const k of ['prompt', 'negative', 'unet_name', 'clip_vision_name', 'weight_dtype', 'sampler_name', 'scheduler', 'control_after_generate']) if (d[k] !== undefined && d[k] !== null && String(d[k]) !== '') this.ep[k] = d[k];
+          for (const k of ['width', 'height', 'steps', 'cfg', 'shift']) if (d[k] !== undefined && d[k] !== null) this.ep[k] = d[k];
+          if (d.seed !== undefined) this.ep.seed = d.seed;
+          if (this.ep.width && this.ep.height) {
+            const r = this.ep.width / this.ep.height;
+            this.eRatioLock = Math.abs(r - 16 / 9) < 0.02 ? '16:9' : Math.abs(r - 4 / 3) < 0.02 ? '4:3' : '';
+            this.eRatio = this.eRatioLock === '16:9' ? 16 / 9 : this.eRatioLock === '4:3' ? 4 / 3 : 0;
+            this.eSizePreset = matchPreset(this.ep.width, this.ep.height);
+          }
+        } catch (e) { /* 后端不可达时保留前端默认值 */ }
+      },
+      eOnRatioLock() {
+        this.eRatio = this.eRatioLock === '16:9' ? 16 / 9 : this.eRatioLock === '4:3' ? 4 / 3 : 0;
+        if (!this.eRatio) return;
+        if (Number(this.ep.width) > 0) { this._syncing = true; this.ep.height = Math.round(this.ep.width / this.eRatio); this._syncing = false; }
+        else if (Number(this.ep.height) > 0) { this._syncing = true; this.ep.width = Math.round(this.ep.height * this.eRatio); this._syncing = false; }
+      },
+      eSwapSize() {
+        const w = Number(this.ep.width) || 0, h = Number(this.ep.height) || 0;
+        if (!w || !h) return;
+        this._syncing = true; this.ep.width = h; this.ep.height = w; this._syncing = false;
+        const r = h / w;
+        this.eRatioLock = Math.abs(r - 16 / 9) < 0.02 ? '16:9' : Math.abs(r - 4 / 3) < 0.02 ? '4:3' : '';
+        this.eRatio = this.eRatioLock === '16:9' ? 16 / 9 : this.eRatioLock === '4:3' ? 4 / 3 : 0;
+        this.eSizePreset = matchPreset(this.ep.width, this.ep.height);
+      },
+      eApplyPreset() {
+        if (!this.eSizePreset) return;
+        const [w, h] = this.eSizePreset.split('x').map(Number);
+        this._syncing = true; this.ep.width = w; this.ep.height = h; this._syncing = false;
+        const r = w / h;
+        this.eRatioLock = Math.abs(r - 16 / 9) < 0.02 ? '16:9' : Math.abs(r - 4 / 3) < 0.02 ? '4:3' : '';
+        this.eRatio = this.eRatioLock === '16:9' ? 16 / 9 : this.eRatioLock === '4:3' ? 4 / 3 : 0;
+      },
+      // 需求35 参考图三路入口（上传/系统选图/粘贴），统一走 appendEditRefs 收口（上限 3 = 节点 image1..3）
+      onEditFiles(e) {
+        const files = Array.from(e.target.files || []); e.target.value = '';
+        this.appendEditRefs(files.map((f) => ({ name: f.name, ext: (f.name.split('.').pop() || 'png'), file: f })), '上传');
+      },
+      onEditPasteConfirm(list) {
+        this.editPasteOpen = false;
+        if (!list || !list.length) return;
+        this.appendEditRefs(list.map((it) => ({ name: it.name || '粘贴图', ext: it.ext || 'png', dataUrl: it.dataUrl })), '粘贴');
+      },
+      appendEditRefs(items, how) {
+        const free = 3 - this.editRefs.length;
+        if (free <= 0) { alert('参考图最多 3 张（图1 = 要编辑的原图，图2/图3 = 补充参考）——先移除不要的再' + how); return; }
+        if (items.length > free) alert('节点最多 3 张参考图，只取前 ' + free + ' 张（多余的已忽略）');
+        for (const it of items.slice(0, free)) {
+          if (it.dataUrl) { this.editRefs.push({ dataUrl: it.dataUrl, ext: it.ext, name: it.name }); continue; }
+          const f = it.file; const r = new FileReader();
+          r.onload = () => this.editRefs.push({ dataUrl: r.result, ext: it.ext || 'png', name: it.name });
+          r.readAsDataURL(f);
+        }
+      },
+      rmEditRef(i) { this.editRefs.splice(i, 1); },
+      zoomEditRef(i) {
+        const r = this.editRefs[i]; if (!r) return;
+        openViewer([{ kind: 'image', url: r.dataUrl, title: r.name || '参考图' + (i + 1) }], 0);
+      },
+      async loadEditPick() {
+        this.editPickOpen = true; this.editPickBusy = true;
+        try {
+          const d = await api('GET', '/image/queue');
+          this.editPickList = (d.jobs || []).filter((j) => j.status === 'done' && j.image_path).map((j) => {
+            let wh = '';
+            try { const pp = JSON.parse(j.params || '{}'); if (pp.width && pp.height) wh = pp.width + '×' + pp.height; } catch (e) { /* 参数解析失败照样可选 */ }
+            const file = basename(j.image_path);
+            return { id: j.id, file, wh, src: { ad: '分层图', h3: '文生图H3' }[j.source] || '文生图Z', url: authed('/api/image/output/' + file), prompt: String(j.prompt || '').slice(0, 40) };
+          });
+        } catch (e) { alert('拉取历史图失败：' + e.message); this.editPickOpen = false; }
+        this.editPickBusy = false;
+      },
+      async editPickOne(it) {
+        if (this.editRefs.length >= 3) { alert('参考图最多 3 张（图1 = 要编辑的原图，图2/图3 = 补充参考）'); this.editPickOpen = false; return; }
+        this.editPickBusy = true;
+        try {
+          const r = await fetch(it.url);
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          const blob = await r.blob();
+          const dataUrl = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = () => rej(new Error('读取失败')); fr.readAsDataURL(blob); });
+          this.editRefs.push({ dataUrl, ext: (it.file.split('.').pop() || 'png'), name: it.file });
+          this.editPickOpen = false;
+        } catch (e) { alert('选图失败：' + e.message); }
+        this.editPickBusy = false;
+      },
+      async goEdit() {
+        if (!this.ep.prompt.trim()) { alert('请输入编辑指令（正向提示词：说明怎么改参考图，例如「把外套改成深蓝色，其余保持不变」）'); return; }
+        if (!this.editRefs.length) { alert('请先添加参考图：图1 = 要编辑的原图（必填）'); return; }
+        this.busy = true; this.job = null; this.statusText = '提交中…'; this.pctHigh = 0; this.startClock();
+        try {
+          const body = {
+            prompt: this.ep.prompt, negative_prompt: this.ep.negative,
+            clip_name: this.p.clip_name, clip_type: this.p.clip_type, // Qwen3 文本编码器与 Turbo 共用（同一套默认件）
+            vae_name: this.p.vae_name, unet_name: this.ep.unet_name, weight_dtype: this.ep.weight_dtype,
+            clip_vision_name: this.ep.clip_vision_name,
+            width: this.ep.width, height: this.ep.height, batch_size: 1, shift: this.ep.shift,
+            seed: this.ep.seed, steps: this.ep.steps, cfg: this.ep.cfg,
+            sampler_name: this.ep.sampler_name, scheduler: this.ep.scheduler, denoise: 1.0,
+            gen_mode: 'edit', source: 'zimage',
+            images: this.editRefs.slice(0, 3).map((r) => ({ data: r.dataUrl, ext: r.ext || 'png' })),
+          };
+          const _busy = await busyBefore();
+          const d = await api('POST', '/image/generate', body);
+          this.poll(d.id); this.refreshQueue(); queueBusyNotice(_busy);
+        } catch (e) { alert(e.message); this.statusText = ''; this.busy = false; this.stopClock(); }
+      },
       async go() {
+        if (this.tab === 'edit') return this.goEdit(); // 需求34：页头「开始生成」按当前页签分发
         const mode = this.p.gen_mode || 't2i';
         if (mode === 't2i' && !this.p.prompt.trim()) { alert('请输入正向提示词'); return; }
         if (mode !== 't2i' && !this.hiresImage) { alert('请先选择原图'); return; }
@@ -1458,7 +1752,7 @@
   // ---------- 文生图H3（MiniMax-H3-Image，v1.0.44） ----------
   // 需求19：复制文生图页骨架、节点全部换成 H3-Image 管线（Image Studio），预留 int8 切换位
   //（int8_convrot 默认 / GGUF Q4_0 预留 / P-H3 w4a8 小显存预留）。
-  // 需求20：参考图上传 + 从本系统历史生成图中选（第一张=源图，其余=参考图2..9，上限 9 张）；
+  // 需求20：参考图上传 + 从本系统历史生成图中选（第一张=源图；v1.0.61 需求39 上限 16 张、建议 10 张）；
   // 有参考图时自动切参考图编辑（ref2va 模型，提示词=编辑指令），无参考图=纯文生图（fl2va + Turbo LoRA）。
   const H3Image = {
     template: `
@@ -1573,7 +1867,7 @@
           <div class="muted" style="font-size:12px;margin-top:6px">采样说明：H3 的「采样器」= 采样档位配方（Turbo LoRA 与步数成对，官方明确警告不可混搭），ComfyUI 侧无自由 steps/CFG/scheduler 输入框；当前配方 LoRA：{{ turboLora }}。</div>
         </details>
 
-        <h3 style="margin:18px 0 8px">参考图 <span class="muted" style="font-weight:400;font-size:12px">（第一张=源图，最多再选 8 张=参考图 2..9；不选 = 纯文生图）</span></h3>
+        <h3 style="margin:18px 0 8px">参考图 <span class="muted" style="font-weight:400;font-size:12px">（第一张=源图，参考图最多 16 张；建议 10 张以内效果为好；不选 = 纯文生图）</span></h3>
         <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
           <div v-for="(r, i) in refs" :key="i" style="position:relative;width:86px;height:86px;border:1px solid rgba(128,128,128,.35);border-radius:8px;overflow:hidden;flex:none">
             <img :src="r.dataUrl" style="width:100%;height:100%;object-fit:cover;cursor:zoom-in" :title="r.name" @click="zoomRef(i)" />
@@ -1858,21 +2152,27 @@
       onRefFiles(e) {
         const files = [...(e.target.files || [])]; e.target.value = '';
         for (const f of files) {
-          if (this.refs.length >= 9) { alert('最多 9 张（源图 + 8 张参考图）'); break; }
+          if (this.refCapHit()) break;
           const ext = (f.name.split('.').pop() || 'png').toLowerCase();
           const r = new FileReader();
-          r.onload = () => { if (this.refs.length < 9) this.refs.push({ name: f.name, dataUrl: r.result, ext, data: r.result }); };
+          r.onload = () => { if (this.refs.length < 16) this.refs.push({ name: f.name, dataUrl: r.result, ext, data: r.result }); };
           r.readAsDataURL(f);
         }
       },
+      // v1.0.61 需求39：三路入口（上传/系统选图/粘贴）统一 16 张上限，到达即提示并建议 10 张效果为好
+      refCapHit() {
+        if (this.refs.length < 16) return false;
+        alert('参考图不能超过 16 张（第一张=源图，最多 15 张参考图）\n建议控制在 10 张以内——参考过多会稀释主体一致性，10 张效果为好');
+        return true;
+      },
       rmRef(i) { this.refs.splice(i, 1); },
-      // 需求28 粘贴图片：多张追加进 refs（与上传图片同效：首张=源图，共 9 张上限）
+      // 需求28 粘贴图片：多张追加进 refs（与上传图片同效：首张=源图，共 16 张上限）
       openPaste() { this.pasteOpen = true; },
       onPasteConfirm(list) {
         this.pasteOpen = false;
         if (!list || !list.length) return;
         for (const it of list) {
-          if (this.refs.length >= 9) { alert('最多 9 张（源图 + 8 张参考图）'); break; }
+          if (this.refCapHit()) break;
           this.refs.push({ name: it.name, dataUrl: it.dataUrl, ext: it.ext, data: it.data });
         }
       },
@@ -1892,7 +2192,7 @@
         this.pickBusy = false;
       },
       async pickOne(it) {
-        if (this.refs.length >= 9) { alert('最多 9 张（源图 + 8 张参考图）'); return; }
+        if (this.refCapHit()) return;
         this.pickBusy = true;
         try {
           const r = await fetch(it.url);

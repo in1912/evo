@@ -122,6 +122,8 @@ router.post('/image/generate', (req, res) => {
     control_after_generate,
     // v1.0.47 需求25：模型装载器与帧选优参数透传（空串=用默认）
     ref_unet_name, unet_gguf, similarity_weight, top_k,
+    // v1.0.61 需求33-37 Z-Image Edit：SigLIP2 视觉编码器文件名（空=按后端目录自动识别）
+    clip_vision_name,
   } = req.body || {};
 
   // v1.0.45：文生图H3 批量=N 条队列任务（逐条种子），配额按条数核
@@ -131,13 +133,14 @@ router.post('/image/generate', (req, res) => {
     if (used + h3BatchN > req.user.quota) return res.status(403).json({ error: `生成次数将达上限（已用 ${used}/${req.user.quota}，本次需 ${h3BatchN} 条）` });
   }
   // v1.0.36 生成模式：t2i=文生图 / hires=重绘放大(img2img) / upscale=纯超分(RealESRGAN，不重绘)
-  const genMode = ['hires', 'upscale'].includes(gen_mode) ? gen_mode : 't2i';
+  // v1.0.61 需求33-37：edit=Z-Image Edit 指令修图（TextEncodeZImageOmni，参考图 1-3 张走 images 数组）
+  const genMode = ['hires', 'upscale', 'edit'].includes(gen_mode) ? gen_mode : 't2i';
   if (genMode !== 'upscale' && !String(prompt || '').trim()) return res.status(400).json({ error: '正向提示词不能为空' });
   const src = source === 'ad' ? 'ad' : (source === 'h3' ? 'h3' : 'zimage'); // 任务来源：广告图/文生图/文生图H3 各自只看自己的队列
 
   // 放大模式：原图落盘（generateRoutes.saveImage 同款 dataURL 解析）
   let srcImagePath = '';
-  if (src === 'zimage' && genMode !== 't2i') {
+  if (src === 'zimage' && genMode !== 't2i' && genMode !== 'edit') {
     const b64 = String((image && image.data) || '').replace(/^data:image\/\w+;base64,/, '');
     const buf = Buffer.from(b64, 'base64');
     if (buf.length < 64) return res.status(400).json({ error: '放大模式：请先上传原图' });
@@ -148,9 +151,10 @@ router.post('/image/generate', (req, res) => {
   const upMethod = ['nearest-exact', 'bicubic', 'bilinear'].includes(upscale_method) ? upscale_method : 'nearest-exact';
 
   // 文生图H3：参考图数组落盘（有图=参考图编辑 refedit，无图=纯文生图 t2i；服务端按图定模式，与前端展示一致）
+  // v1.0.61 需求39：参考图上限 9→16（前端三路入口统一拦 + 建议提示；服务端兜底截断）
   let h3RefPaths = [];
   if (src === 'h3' && Array.isArray(images)) {
-    for (const im of images.slice(0, 9)) {
+    for (const im of images.slice(0, 16)) {
       const b64 = String((im && im.data) || '').replace(/^data:image\/\w+;base64,/, '');
       const buf = Buffer.from(b64, 'base64');
       if (buf.length < 64) continue;
@@ -159,6 +163,23 @@ router.post('/image/generate', (req, res) => {
       fs.writeFileSync(f, buf);
       h3RefPaths.push(f);
     }
+  }
+
+  // v1.0.61 需求33-37 Z-Image Edit 指令修图：参考图数组落盘（首张=要编辑的原图；上限 3 张 = TextEncodeZImageOmni image1..3）
+  let zeditRefPaths = [];
+  if (src === 'zimage' && genMode === 'edit') {
+    if (Array.isArray(images)) {
+      for (const im of images.slice(0, 3)) {
+        const b64 = String((im && im.data) || '').replace(/^data:image\/\w+;base64,/, '');
+        const buf = Buffer.from(b64, 'base64');
+        if (buf.length < 64) continue;
+        const e2 = (String((im && im.ext) || '').replace('.', '').toLowerCase() || 'png').replace(/[^a-z0-9]/g, '') || 'png';
+        const f = path.join(comfy.UPLOAD_DIR, `zedit_src_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.${e2}`);
+        fs.writeFileSync(f, buf);
+        zeditRefPaths.push(f);
+      }
+    }
+    if (!zeditRefPaths.length) return res.status(400).json({ error: 'Edit 模式：请先上传要编辑的原图（参考图1）' });
   }
 
   let params, opts, h3Batch = null;
@@ -185,8 +206,8 @@ router.post('/image/generate', (req, res) => {
       unetName: unet_name || '', refUnetName: ref_unet_name || '', unetGgufName: unet_gguf || '', clipName: clip_name || '', vaeName: vae_name || '',
       similarityWeight: simW, topK: tk, ...(isCustom ? { width: cw, height: ch } : {}) };
   } else {
-    params = { clip_name, clip_type, clip_device, vae_name, unet_name, weight_dtype, width, height, batch_size, shift, seed, steps, cfg, sampler_name, scheduler, denoise, layered: !!layered, layers: Math.max(2, Math.min(8, Math.floor(Number(layers) || 3))), gen_mode: genMode, upscale_method: upMethod };
-    opts = { prompt, negativePrompt: negative_prompt, clipName: clip_name, clipType: clip_type, clipDevice: clip_device, vaeName: vae_name, unetName: unet_name, weightDtype: weight_dtype, width, height, batchSize: batch_size, shift, seed, steps, cfg, samplerName: sampler_name, scheduler, denoise, layered: !!layered, layers: Math.max(2, Math.min(8, Math.floor(Number(layers) || 3))), genMode, srcImagePath, upscaleMethod: upMethod, source: src };
+    params = { clip_name, clip_type, clip_device, vae_name, unet_name, weight_dtype, clip_vision_name: clip_vision_name || '', width, height, batch_size, shift, seed, steps, cfg, sampler_name, scheduler, denoise, layered: !!layered, layers: Math.max(2, Math.min(8, Math.floor(Number(layers) || 3))), gen_mode: genMode, upscale_method: upMethod };
+    opts = { prompt, negativePrompt: negative_prompt, clipName: clip_name, clipType: clip_type, clipDevice: clip_device, vaeName: vae_name, unetName: unet_name, weightDtype: weight_dtype, clipVisionName: clip_vision_name || '', refImages: zeditRefPaths, width, height, batchSize: batch_size, shift, seed, steps, cfg, samplerName: sampler_name, scheduler, denoise, layered: !!layered, layers: Math.max(2, Math.min(8, Math.floor(Number(layers) || 3))), genMode, srcImagePath, upscaleMethod: upMethod, source: src };
   }
   const promptText = String(prompt || '').trim() || (genMode === 'upscale' ? '[纯超分放大]' : '');
   const insertJob = db.prepare('INSERT INTO img_jobs(user_id, prompt, negative_prompt, params, status, source) VALUES(?,?,?,?,?,?)');
@@ -234,6 +255,11 @@ router.get('/image/queue', (req, res) => {
 // 默认参数（正向/负向提示词 + 模型/采样参数预填）
 router.get('/image/defaults', (req, res) => {
   res.json(comfy.zimageDefaults());
+});
+
+// v1.0.61 需求33-37：Z-Image Edit 图生图默认参数（步数 20 / CFG 4 / 1024 档）
+router.get('/image/zedit-defaults', (req, res) => {
+  res.json(comfy.zeditDefaults());
 });
 
 // 广告图（Qwen-Image-Layered）默认参数（提示词内置 PSD 分层引导）

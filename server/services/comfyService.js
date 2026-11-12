@@ -333,6 +333,10 @@ const DEFAULT_MODELS = [
   { key: 'zimage_clip', name: 'Z-Image CLIP 文本编码器', kind: 'text_encoder', path: 'qwen_3_4b.safetensors', grp: 'zimage' },
   { key: 'zimage_vae', name: 'Z-Image VAE（Flux AE）', kind: 'vae', path: 'ae.safetensors', grp: 'zimage' },
   { key: 'zimage_unet', name: 'Z-Image UNet（turbo）', kind: 'diffusion_model', path: 'z_image_turbo_bf16.safetensors', grp: 'zimage' },
+  // v1.0.61 需求33-38 Z-Image Edit（指令修图）：官方权重未发布（2026-11-12 核实 HF/ModelScope 均「To be released」），
+  // 社区 FP8 包需手动放置；文件到位前模型页存在性校验显红即真实状态。不放 MODEL_SOURCES（无 HEAD 可校验的官方直链）。
+  { key: 'zedit_unet', name: 'Z-Image Edit UNet（FP8，官方未发布/社区包手动放置）', kind: 'diffusion_model', path: 'zimage_edit_fp8.safetensors', grp: 'zimage' },
+  { key: 'zedit_clip_vision', name: 'Z-Image Edit SigLIP2 视觉编码器（FP8）', kind: 'clip_vision', path: 'siglip2_fp8.safetensors', grp: 'zimage' },
   // MiniMax-H3（视频生成）：GGUF 主模型 + qwen3vl 编码器 + 视频/音频双 VAE，跑在 8188 便携版
   { key: 'h3_model', name: 'MiniMax-H3 主模型 (GGUF)', kind: 'diffusion_model', path: 'MiniMax-H3-fl2va-curve-Q4_0.gguf', grp: 'h3' },
   // v1.0.55 人物参考图：参考行只有 ref2va 训过（fl2va curve GGUF 无参考行）——传人物参考时自动切这件
@@ -1043,6 +1047,68 @@ function zimageDefaults() {
   } catch { return {}; }
 }
 
+// v1.0.61 需求33-37：Z-Image Edit 指令修图默认参数（步数 16-28 取 20、CFG≈4——Edit 支持 CFG+负面提示词）
+function zeditDefaults() {
+  return {
+    prompt: '把人物的外套改成深蓝色，其余保持不变（人物身份、姿势、背景、光线都不要动）',
+    negative: '构图改变，人物变形，面部改变，多余人物，多余肢体，文字水印，画质下降，模糊',
+    width: 1024, height: 1024, // 3060 12G 在 1024 档稳（1280 易爆显存，见页面「性能说明」）
+    steps: 20, cfg: 4.0, denoise: 1.0, seed: -1, control_after_generate: 'randomize',
+    sampler_name: 'res_multistep', scheduler: 'simple', shift: 3.0,
+    unet_name: '', clip_vision_name: '', weight_dtype: 'default', // 留空=按后端目录自动识别（zimage_edit / siglip 文件）
+  };
+}
+
+// v1.0.61 需求33-37：Z-Image Edit 工作流（TextEncodeZImageOmni，ComfyUI 0.45 内置实验节点）
+// 架构：Qwen3-4B(文本,CLIPLoader lumina2) + SigLIP2(CLIPVisionLoader) + Edit DiT(UNETLoader) + AE VAE
+// ——比 Turbo 多一个 SigLIP2 常驻显存开销，所以必须 FP8 权重 + 适当 offload（3060 12G）。
+// 参考图 1-3 张 → TextEncodeZImageOmni.image1..3（节点内置 auto_resize 到 1MP 档 + VAE 编码为 reference_latents）；
+// SigLIP2 文件缺失时不接 image_encoder（节点可选项），reference_latents 通道仍可用。
+// diffList/clipVisionList：generateImage 从执行后端 /models/<folder> 拉的真实清单（自动识别用；测试可注入）。
+function buildZEditWorkflow(p) {
+  const models = p.models || {};
+  const seedNum = (p.seed === undefined || p.seed === null || p.seed === '' || Number(p.seed) < 0) ? Math.floor(Math.random() * 1e15) : Number(p.seed);
+  const W = Math.max(64, Math.floor(Number(p.width) || 1024)), H = Math.max(64, Math.floor(Number(p.height) || 1024));
+  const steps = Math.max(1, Math.min(50, Math.floor(Number(p.steps) || 20)));
+  const cfg = Math.max(1, Math.min(10, Number(p.cfg) || 4.0));
+  const pickFile = (list, re, dft) => {
+    const hits = (list || []).filter((n) => re.test(String(n))).sort((a, b) => a.length - b.length);
+    return hits.find((n) => !/aio/i.test(String(n))) || hits[0] || dft; // AIO 合包靠后（性能说明页明确「勿下 AIO 大包」）
+  };
+  // Edit DiT：手动指定 > 模型表配置 > 目录自动识别（zimage_edit / z_image_edit 命名都认）
+  const unet = (p.unetName || '').trim() || models.zedit_unet || pickFile(p.diffList, /z[_.-]?image[_.-]?edit/i, '') || 'zimage_edit_fp8.safetensors';
+  // SigLIP2 视觉编码器：同规则（clip_vision 目录下的 siglip 文件；clip_vision_h.safetensors 是 WAN 的，不会命中）
+  const sig = (p.clipVisionName || '').trim() || models.zedit_clip_vision || pickFile(p.clipVisionList, /siglip/i, '') || '';
+  const refs = (p.refNames || []).slice(0, 3);
+  const wf = {
+    '39': { class_type: 'CLIPLoader', inputs: { clip_name: p.clipName || models.zimage_clip || 'qwen_3_4b.safetensors', type: 'lumina2', device: 'default' } },
+    '40': { class_type: 'VAELoader', inputs: { vae_name: p.vaeName || models.zimage_vae || 'ae.safetensors' } },
+    '41': { class_type: 'UNETLoader', inputs: { unet_name: unet, weight_dtype: p.weightDtype || 'default' } },
+    '42': { class_type: 'ModelSamplingAuraFlow', inputs: { model: ['41', 0], shift: Number(p.shift) || 3.0 } },
+    '43': { class_type: 'EmptySD3LatentImage', inputs: { width: W, height: H, batch_size: 1 } },
+    '45': { class_type: 'TextEncodeZImageOmni', inputs: {
+      clip: ['39', 0], prompt: String(p.prompt || '').trim(), auto_resize_images: true, vae: ['40', 0],
+    } },
+    '50': { class_type: 'TextEncodeZImageOmni', inputs: { clip: ['39', 0], prompt: String(p.negativePrompt || '').trim(), auto_resize_images: true } },
+    '44': { class_type: 'KSampler', inputs: {
+      model: ['42', 0], positive: ['45', 0], negative: ['50', 0], latent_image: ['43', 0],
+      seed: seedNum, steps, cfg, sampler_name: p.samplerName || 'res_multistep', scheduler: p.scheduler || 'simple', denoise: 1.0,
+    } },
+    '46': { class_type: 'VAEDecode', inputs: { samples: ['44', 0], vae: ['40', 0] } },
+    '47': { class_type: 'SaveImage', inputs: { images: ['46', 0], filename_prefix: `zedit_${p.jobId}` } },
+  };
+  if (sig) {
+    wf['cv'] = { class_type: 'CLIPVisionLoader', inputs: { clip_name: sig } };
+    wf['45'].inputs.image_encoder = ['cv', 0];
+  }
+  // 参考图：image1..3 直连（最多 3 张，超出截断）；首张=要编辑的原图
+  refs.forEach((name, i) => {
+    wf['2r' + (i ? i + 1 : '')] = { class_type: 'LoadImage', inputs: { image: name } };
+    wf['45'].inputs['image' + (i + 1)] = ['2r' + (i ? i + 1 : ''), 0];
+  });
+  return wf;
+}
+
 // H3 示例提示词（取自 dance_street_workflow_ui.json 的 script，作页面预填示例）
 const H3_DEFAULT_SCRIPT = '画面从提供的首帧参考图开始，一镜到底连续拍摄，单人舞蹈直拍。\n角色一致性锚点（必须保持）：年轻东亚女性，栗棕色大波浪长卷发及腰，空气刘海，左侧银色星星发夹，小圆环耳环，肚脐钉。五官精致，大眼睛，妆容自然清透。身穿黑色短款牛仔外套（敞开），内搭白色修身短款吊带露腰，高腰浅蓝色阔腿牛仔裤，斜挎黑色漆皮小方包（带银色蝴蝶结装饰）。整体形象与参考图完全一致，不改变发型、发色、服装、配饰和面部特征。\n舞蹈动作：韩系女团风格舞蹈，节奏明快有力。起始姿势为参考图姿态（双手抬至头部两侧），随后双手顺势放下，头部微甩，头发随动作飘动；接着身体向右侧 wave，右手从头顶滑至腰侧，胯部同步摆动；然后向前走两步，双臂交叉打开，配合肩部律动；中段原地转体一圈，长发和牛仔外套随旋转飞扬；随后做一个下蹲起身的动作，双手从膝盖滑至胸前；结尾面对镜头，单手比心放在脸颊旁，俏皮眨眼微笑。动作流畅自然，富有节奏感和表现力，肢体线条优美。\n场景环境：保持参考图的城市街道场景，斑马线、沥青路面、背景建筑和树木不变。夕阳金色光线持续，微风轻拂发丝和衣角。背景有轻微虚化，突出人物主体。街道上无其他行人干扰。\n镜头语言：中景固定机位为主，人物始终在画面中心。舞蹈动作幅度大时镜头轻微跟随，保持人物完整入镜。转体时镜头不晃动，稳定捕捉全身动作。整体镜头稳定，类似直拍 fancam 视角。\n光影氛围：保持参考图的金色夕阳逆光，人物轮廓有温暖光晕，面部有柔和补光。地面和建筑反射夕阳暖色调。整体光影温暖浪漫，与参考图一致。\n画质风格：4K 超清，电影级质感，人物清晰锐利，背景适度虚化。色彩温暖饱和，皮肤质感自然细腻，发丝动态清晰。整体风格时尚青春，类似街头舞蹈直拍。\n负面约束：不改变人物面部特征、发型发色、服装和配饰；不出现多余人物；不切换场景；画面不抖动不模糊；肢体不变形；手指不扭曲；不出现文字水印。\n音频：无人物对白，无旁白，仅有轻柔的街道环境音与低沉的音乐律动。';
 
@@ -1158,7 +1224,7 @@ function buildH3Workflow(p) {
 }
 
 // ---------- Z-image 文生图 生成 ----------
-async function generateImage({ prompt, negativePrompt, clipName, clipType, clipDevice, vaeName, unetName, weightDtype, width, height, batchSize, shift, seed, steps, cfg, samplerName, scheduler, denoise, genMode, srcImagePath, upscaleMethod }, onProgress, taskRef) {
+async function generateImage({ prompt, negativePrompt, clipName, clipType, clipDevice, vaeName, unetName, weightDtype, clipVisionName, refImages, width, height, batchSize, shift, seed, steps, cfg, samplerName, scheduler, denoise, genMode, srcImagePath, upscaleMethod }, onProgress, taskRef) {
   const prog = (s, pct) => { if (typeof onProgress === 'function') onProgress(s, pct); };
   const jobId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const W = Math.max(64, Math.floor(Number(width) || 1920)), H = Math.max(64, Math.floor(Number(height) || 1080));
@@ -1174,7 +1240,47 @@ async function generateImage({ prompt, negativePrompt, clipName, clipType, clipD
   }
 
   let wf;
-  if (genMode === 'upscale') {
+  if (genMode === 'edit') {
+    // v1.0.61 需求33-37 Z-Image Edit 指令修图：DiT/SigLIP2 文件名按执行后端目录自动识别（官方权重未发布，
+    // 社区 FP8 包命名不定）。识别不到且未手动指定 → 人话报错指路（不提交无效任务烧队列）。
+    prog('检查 Edit 模型…', 5);
+    await ensureZimage();
+    const base = baseUrl('zimage');
+    const [diffList, clipVisionList] = [await listComfyModels(base, 'diffusion_models'), await listComfyModels(base, 'clip_vision')];
+    const models = modelMap('zimage');
+    const pickFile = (list, re) => { const hits = (list || []).filter((n) => re.test(String(n))).sort((a, b) => a.length - b.length); return hits.find((n) => !/aio/i.test(String(n))) || hits[0] || ''; };
+    // 模型配置表可能存着默认占位名（官方未发布、文件并不存在）——按后端目录清单核实，不存在视同未配置
+    const inList = (list, name) => !list || String(list).includes(name);
+    const explicitDit = (unetName || '').trim();
+    if (explicitDit && !inList(diffList, explicitDit)) {
+      throw new Error('指定的 Edit 主模型不存在：' + explicitDit + '（ComfyUI/models/diffusion_models/ 下没有该文件；清空后可自动识别 zimage_edit 文件）');
+    }
+    const cfgDit = String(models.zedit_unet || '').trim();
+    const autoDit = pickFile(diffList, /z[_.-]?image[_.-]?edit/i);
+    const dit = explicitDit || (cfgDit && inList(diffList, cfgDit) ? cfgDit : '') || autoDit || '';
+    if (!dit) {
+      throw new Error('Z-Image Edit 模型未就位：ComfyUI/models/diffusion_models/ 下没有 zimage_edit（或 z_image_edit）文件。官方权重尚未发布（Tongyi-MAI 仓库标「To be released」），需手动放置社区 FP8 包；下载渠道与放置目录见本页「性能说明」页签。');
+    }
+    const explicitSig = (clipVisionName || '').trim();
+    if (explicitSig && !inList(clipVisionList, explicitSig)) {
+      throw new Error('指定的 SigLIP2 编码器不存在：' + explicitSig + '（ComfyUI/models/clip_vision/ 下没有该文件；清空后可自动识别 siglip 文件）');
+    }
+    const cfgSig = String(models.zedit_clip_vision || '').trim();
+    const sigName = explicitSig || (cfgSig && inList(clipVisionList, cfgSig) ? cfgSig : '') || pickFile(clipVisionList, /siglip/i) || '';
+    prog('上传参考图…', 10);
+    const refNames = [];
+    for (const rp of (refImages || []).slice(0, 3)) {
+      const ext = (path.extname(rp) || '.png').slice(1) || 'png';
+      const name = `zedit_ref_${Date.now()}_${refNames.length}.${ext}`;
+      await placeInputTo(rp, name, base, isRemote ? null : COMFY_DIR);
+      refNames.push(name);
+    }
+    wf = buildZEditWorkflow({
+      prompt, negativePrompt, clipName, vaeName, unetName: dit, clipVisionName: sigName, weightDtype,
+      width, height, steps, cfg, seed, samplerName, scheduler, shift, jobId, models,
+      diffList, clipVisionList, refNames,
+    });
+  } else if (genMode === 'upscale') {
     // 纯超分：LoadImage → RealESRGAN ×4 → 缩到目标尺寸。不加载扩散模型、不采样（秒级）。
     // 模型取 upscale_models 目录第一个 .pth；远端模式目录在算力端（已放 RealESRGAN_x4plus.pth），
     // 缺模型时 ComfyUI 会直接报错——本地模式提前给友好提示。
@@ -1285,6 +1391,20 @@ async function listVaeModels(base) { // 枚举执行后端 models/vae（60s 缓�
   return null;
 }
 
+// v1.0.61 需求33：通用模型目录枚举（models/<folder>，60s 缓存；失败返回 null → 调用方走默认值兜底）
+// Z-Image Edit 的 DiT/SigLIP2 文件名自动识别用（官方权重未发布，社区包命名不定，不能写死）
+const _comfyModelListCache = {};
+async function listComfyModels(base, folder) {
+  const c = _comfyModelListCache[folder];
+  if (c && c.list && Date.now() - c.ts < 60000) return c.list;
+  try {
+    const r = await fetch(`${base}/models/${folder}`, { signal: AbortSignal.timeout(8000) });
+    const j = await r.json();
+    if (Array.isArray(j)) { _comfyModelListCache[folder] = { ts: Date.now(), list: j }; return j; }
+  } catch { /* 探测失败不拦截 */ }
+  return null;
+}
+
 function h3iDefaults() {
   return {
     // 需求23 预置提示词：结构化人像模板（场景/姿态/穿搭/面部/光影五段）+ 配套负面词
@@ -1344,7 +1464,8 @@ function buildH3ImageWorkflow(p) {
     ? (p.refUnetName || p.refUnet || models.h3i_ref_model || 'minimax_h3_ref2va_pruned_int8_convrot.safetensors')
     : (variant === 'gguf' ? (p.unetGgufName || p.unetGguf || models.h3i_model_gguf || 'MiniMax-H3-fl2va-curve-Q4_0.gguf')
                           : (p.unetName || p.unet || models.h3i_model || 'minimax_h3_fl2va_pruned_int8_convrot.safetensors'));
-  const refs = (p.refNames || []).slice(0, 9);
+  // v1.0.61 需求39：参考图上限 9→16（前端 16 拦截+建议 10 张，服务端同口径兜底）
+  const refs = (p.refNames || []).slice(0, 16);
 
   // v1.0.45 自定义尺寸：aspectRatio='custom' 时宽高直传 prepare 节点（32 圆整、256~16384 夹取），预设节点输出不参与
   const custom = p.aspectRatio === 'custom';
@@ -1439,11 +1560,11 @@ async function generateH3Image({ prompt, mode, variant, turbo, aspectRatio, reso
     }
   } catch (e) { if (String(e.message || '').includes('需要 ComfyUI')) throw e; /* 探测失败不拦截，交给提交环节报错 */ }
 
-  // 参考图送入 ComfyUI input（第一张=源图，其余=参考图2..9，上限 9 张）
+  // 参考图送入 ComfyUI input（第一张=源图；v1.0.61 需求39 上限 16 张）
   const refNames = [];
   if ((refImages || []).length) {
-    prog(`上传参考图（${Math.min(9, refImages.length)} 张）…`, 8);
-    for (let i = 0; i < Math.min(9, refImages.length); i++) {
+    prog(`上传参考图（${Math.min(16, refImages.length)} 张）…`, 8);
+    for (let i = 0; i < Math.min(16, refImages.length); i++) {
       const ext = (path.extname(refImages[i]) || '.png').slice(1) || 'png';
       const name = `h3i_ref_${jobId}_${i}.${ext}`;
       await placeInputTo(refImages[i], name, base, isRemote ? null : COMFY_DIR);
@@ -1815,4 +1936,5 @@ async function adoptRun({ base, promptId, kind, jobId, extract, deadlineMin = 13
 // 从任意 base（含本机 local 模式的 8189）经 HTTP /view 下载产物——收养路径统一走 HTTP，避免依赖当前模式
 async function downloadOutput(out, dst, base) { await fetchOutputTo(out, dst, base, null); }
 
-module.exports = { ensureComfy, ensureZimage, fetchHistory, pollHistorySafe, freeIfKindSwitch, fetchViewWithRetry, fetchOutputTo, generate, generateImage, generateH3Video, buildH3Workflow, ensureH3, zimageDefaults, h3Defaults, qilDefaults, generateQilImage, buildQilWorkflow, assemblePsd, extractImages, status, statusFor, modelMap, DEFAULT_MODELS, DEFAULT_NEGATIVE, seedModels, listLoras, runHighResFix, getMode, getUrl, baseUrl, setBackend, outputDir, lanIp, getListenAddr, configureComputeNode, UPLOAD_DIR, COMFY_DIR, PYTHON, FFMPEG_DIR, WORKFLOW_FLF, WORKFLOW_ZIMAGE, activeRuns, adoptRun, downloadOutput, syncModelPaths, selfHealBackend, generateH3Image, h3iDefaults, buildH3ImageWorkflow, H3I_REQUIRED_VERSION, listVaeModels, __resetVaeCacheForTest: () => { _vaeListCache = { ts: 0, list: null }; } };
+module.exports = { ensureComfy, ensureZimage, fetchHistory, pollHistorySafe, freeIfKindSwitch, fetchViewWithRetry, fetchOutputTo, generate, generateImage, generateH3Video, buildH3Workflow, ensureH3, zimageDefaults, h3Defaults, qilDefaults, generateQilImage, buildQilWorkflow, assemblePsd, extractImages, status, statusFor, modelMap, DEFAULT_MODELS, DEFAULT_NEGATIVE, seedModels, listLoras, runHighResFix, getMode, getUrl, baseUrl, setBackend, outputDir, lanIp, getListenAddr, configureComputeNode, UPLOAD_DIR, COMFY_DIR, PYTHON, FFMPEG_DIR, WORKFLOW_FLF, WORKFLOW_ZIMAGE, activeRuns, adoptRun, downloadOutput, syncModelPaths, selfHealBackend, generateH3Image, h3iDefaults, buildH3ImageWorkflow, H3I_REQUIRED_VERSION, listVaeModels, __resetVaeCacheForTest: () => { _vaeListCache = { ts: 0, list: null }; },
+  zeditDefaults, buildZEditWorkflow, listComfyModels, __resetModelListCacheForTest: () => { for (const k of Object.keys(_comfyModelListCache)) delete _comfyModelListCache[k]; } };
