@@ -2715,6 +2715,8 @@
       async submitBatch() {
         const list = this.batchList;
         if (!list.length || this.batchBusy) return;
+        // v1.0.60 软闸：批量更疯，超训练上限先确认
+        if (Number(this.p.frames_per_shot) > 362 && !confirm('每镜头 ' + this.p.frames_per_shot + ' 帧已超过模型训练上限 362 帧（≈15 秒），批量提交会把算力机压到小时级。确定仍要继续？')) return;
         this.batchBusy = true; this.batchDone = 0;
         const _busy = await busyBefore();
         let ok = 0; const fails = [];
@@ -2829,6 +2831,8 @@
       async go() {
         if (!this.p.prompt.trim()) { alert('请输入提示词'); return; }
         if (this.mode === 'i2v' && !this.image) { alert('图生视频模式请先上传首帧参考图'); return; }
+        // v1.0.60 软闸：超训练上限先打招呼（481 帧实测会把后端压到轮询失联级 lag）
+        if (Number(this.p.frames_per_shot) > 362 && !confirm('每镜头 ' + this.p.frames_per_shot + ' 帧（≈' + (this.p.frames_per_shot / this.p.fps).toFixed(1) + ' 秒）已超过模型训练上限 362 帧（≈15 秒）：采样时间会暴涨（3060 上 2 小时级）、画面后段可能不稳。长片建议用「镜头数」分段（每镜头 ≤362 帧）。确定仍要继续？')) return;
         this.busy = true; this.job = null; this.statusText = '提交中…'; this.pctHigh = 0; this.startClock();
         try {
           const body = {

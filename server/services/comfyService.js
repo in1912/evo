@@ -176,6 +176,22 @@ async function fetchHistory(base, promptId, tries = 15) {
   throw lastErr || new Error('history 不可达');
 }
 
+// v1.0.60：轮询不判死——481 帧级重载下 ComfyUI 的 HTTP 应答可 lag 数分钟而采样仍在推进
+// （WebSocket 进度照常流，2026-11-12 生产实踩：采样 12/20 时 fetchHistory 连续 15 次超时把任务判死，
+//  GPU 还在算 = 僵尸）。改为：彻底失联连续 10 分钟才报错（期间任何一次成功即清零计时），
+// 否则不判死，交给各循环自己的 deadline 总闸。state 传 { t: 0 } 引用在循环外创建。
+async function pollHistorySafe(base, promptId, state) {
+  try {
+    const h = await fetchHistory(base, promptId, 3);
+    state.t = 0;
+    return h;
+  } catch (e) {
+    if (!state.t) state.t = Date.now();
+    if (Date.now() - state.t > Number(process.env.EV_UNREACHABLE_BUDGET_MS || 10 * 60 * 1000)) throw new Error('后端持续无应答（' + ((e && e.message) || '') + '）——检查算力端是否存活');
+    return null;
+  }
+}
+
 // v1.0.51 需求31：跨类切换先释放显存——zimage/h3/h3i/i2v/qil 模型集互不共用，
 // 残留驻留会把下一条任务挤成分页采样（实测 1080×1920/9步：暖缓存 42s，残留驻留后 170s+）。
 // 提交前发现同一后端上一条是别的类，就 POST /free 干净卸载再加载（同类连续任务不受影响）。
@@ -870,11 +886,12 @@ async function generate({ imagePath, endImagePath, prompt, negativePrompt, seed,
   const deadline = Date.now() + 30 * 60 * 1000;
   let out = null;
   let lastStatus = '';
+  const unreachable = { t: 0 };
   try {
     while (Date.now() < deadline) {
       checkCancelled(promptId);
-      const hist = await fetchHistory(baseUrl(), promptId);
-      const entry = hist[promptId];
+      const hist = await pollHistorySafe(baseUrl(), promptId, unreachable);
+      const entry = hist ? hist[promptId] : null;
       if (entry && entry.status) {
         lastStatus = entry.status.status_str || lastStatus;
         if (entry.status.completed) { out = extractVideo(hist); break; }
@@ -1219,11 +1236,12 @@ async function generateImage({ prompt, negativePrompt, clipName, clipType, clipD
   activeRuns.set(promptId, { kind: (taskRef && taskRef.kind) || 'zimage', jobId: String((taskRef && taskRef.jobId) || jobId), base: baseUrl('zimage'), ts: Date.now(), cancelled: false });
   const deadline = Date.now() + 20 * 60 * 1000;
   let out = null; let lastStatus = '';
+  const unreachable = { t: 0 };
   try {
     while (Date.now() < deadline) {
       checkCancelled(promptId);
-      const hist = await fetchHistory(baseUrl('zimage'), promptId);
-      const entry = hist[promptId];
+      const hist = await pollHistorySafe(baseUrl('zimage'), promptId, unreachable);
+      const entry = hist ? hist[promptId] : null;
       if (entry && entry.status) {
         lastStatus = entry.status.status_str || lastStatus;
         if (entry.status.completed) { out = extractImage(hist); break; }
@@ -1471,11 +1489,12 @@ async function generateH3Image({ prompt, mode, variant, turbo, aspectRatio, reso
   activeRuns.set(promptId, { kind: (taskRef && taskRef.kind) || 'h3i', jobId: String((taskRef && taskRef.jobId) || jobId), base, ts: Date.now(), cancelled: false });
   const deadline = Date.now() + 30 * 60 * 1000;
   let out = null; let lastStatus = '';
+  const unreachable = { t: 0 };
   try {
     while (Date.now() < deadline) {
       checkCancelled(promptId);
-      const hist = await fetchHistory(base, promptId);
-      const entry = hist[promptId];
+      const hist = await pollHistorySafe(base, promptId, unreachable);
+      const entry = hist ? hist[promptId] : null;
       if (entry && entry.status) {
         lastStatus = entry.status.status_str || lastStatus;
         if (entry.status.completed) { out = extractImage(hist); break; }
@@ -1593,12 +1612,13 @@ async function generateQilImage({ prompt, negativePrompt, clipName, clipType, cl
   prog('生成中（采样/分层解码）…', 30);
   activeRuns.set(promptId, { kind: (taskRef && taskRef.kind) || 'qil', jobId: String((taskRef && taskRef.jobId) || jobId), base, ts: Date.now(), cancelled: false });
   const deadline = Date.now() + 30 * 60 * 1000;
-  let hist = null; let lastStatus = '';
+  let hist = null; let lastStatus = ''; // v1.0.60 修遮蔽雷：此前循环内 const hist 遮蔽此变量，完成后 1614 的完成判定恒 false → 必误报超时
+  const unreachable = { t: 0 };
   try {
     while (Date.now() < deadline) {
       checkCancelled(promptId);
-      const hist = await fetchHistory(base, promptId);
-      const entry = hist[promptId];
+      hist = await pollHistorySafe(base, promptId, unreachable);
+      const entry = hist ? hist[promptId] : null;
       if (entry && entry.status) {
         lastStatus = entry.status.status_str || lastStatus;
         if (entry.status.completed) break;
@@ -1701,11 +1721,12 @@ async function generateH3Video({ imagePath, endImagePath, refImages, prompt, mod
   activeRuns.set(promptId, { kind: (taskRef && taskRef.kind) || 'h3', jobId: String((taskRef && taskRef.jobId) || jobId), base, ts: Date.now(), cancelled: false });
   const deadline = Date.now() + 120 * 60 * 1000; // H3 视频生成较久：20 步全尺寸在 3060 上 40min+，上限放宽到 120 分钟
   let out = null; let lastStatus = '';
+  const unreachable = { t: 0 };
   try {
     while (Date.now() < deadline) {
       checkCancelled(promptId);
-      const hist = await fetchHistory(base, promptId);
-      const entry = hist[promptId];
+      const hist = await pollHistorySafe(base, promptId, unreachable);
+      const entry = hist ? hist[promptId] : null;
       if (entry && entry.status) {
         lastStatus = entry.status.status_str || lastStatus;
         if (entry.status.completed) { out = extractVideoRaw(hist); break; }
@@ -1794,4 +1815,4 @@ async function adoptRun({ base, promptId, kind, jobId, extract, deadlineMin = 13
 // 从任意 base（含本机 local 模式的 8189）经 HTTP /view 下载产物——收养路径统一走 HTTP，避免依赖当前模式
 async function downloadOutput(out, dst, base) { await fetchOutputTo(out, dst, base, null); }
 
-module.exports = { ensureComfy, ensureZimage, fetchHistory, freeIfKindSwitch, fetchViewWithRetry, fetchOutputTo, generate, generateImage, generateH3Video, buildH3Workflow, ensureH3, zimageDefaults, h3Defaults, qilDefaults, generateQilImage, buildQilWorkflow, assemblePsd, extractImages, status, statusFor, modelMap, DEFAULT_MODELS, DEFAULT_NEGATIVE, seedModels, listLoras, runHighResFix, getMode, getUrl, baseUrl, setBackend, outputDir, lanIp, getListenAddr, configureComputeNode, UPLOAD_DIR, COMFY_DIR, PYTHON, FFMPEG_DIR, WORKFLOW_FLF, WORKFLOW_ZIMAGE, activeRuns, adoptRun, downloadOutput, syncModelPaths, selfHealBackend, generateH3Image, h3iDefaults, buildH3ImageWorkflow, H3I_REQUIRED_VERSION, listVaeModels, __resetVaeCacheForTest: () => { _vaeListCache = { ts: 0, list: null }; } };
+module.exports = { ensureComfy, ensureZimage, fetchHistory, pollHistorySafe, freeIfKindSwitch, fetchViewWithRetry, fetchOutputTo, generate, generateImage, generateH3Video, buildH3Workflow, ensureH3, zimageDefaults, h3Defaults, qilDefaults, generateQilImage, buildQilWorkflow, assemblePsd, extractImages, status, statusFor, modelMap, DEFAULT_MODELS, DEFAULT_NEGATIVE, seedModels, listLoras, runHighResFix, getMode, getUrl, baseUrl, setBackend, outputDir, lanIp, getListenAddr, configureComputeNode, UPLOAD_DIR, COMFY_DIR, PYTHON, FFMPEG_DIR, WORKFLOW_FLF, WORKFLOW_ZIMAGE, activeRuns, adoptRun, downloadOutput, syncModelPaths, selfHealBackend, generateH3Image, h3iDefaults, buildH3ImageWorkflow, H3I_REQUIRED_VERSION, listVaeModels, __resetVaeCacheForTest: () => { _vaeListCache = { ts: 0, list: null }; } };
