@@ -2449,7 +2449,7 @@
       <div class="card">
         <h3>功能控制框</h3>
         <div class="row">
-          <div class="field"><label>主模型（model_name）</label><input v-model="p.model_name" /></div>
+          <div class="field"><label>主模型（model_name）</label><input v-model="p.model_name" placeholder="留空 = 自动：无参考 fl2va · 带参考 ref2va" title="留空时自动选：无人物参考用 fl2va，带参考自动切 ref2va；手动填了就以你为准" /></div>
           <div class="field"><label>文本编码器（clip_name）</label><input v-model="p.clip_name" /></div>
           <div class="field"><label>CLIP 类型（clip_type）</label><input v-model="p.clip_type" /></div>
         </div>
