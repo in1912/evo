@@ -41,7 +41,7 @@
   // ---------- 全局状态 ----------
   const store = reactive({
     user: null,
-    route: (location.hash || '#/generate').replace(/^#\/?/, '') || 'generate',
+    route: (location.hash || '#/h3image').replace(/^#\/?/, '') || 'h3image',
     theme: localStorage.getItem('evolveshot_theme') || 'day',
     loading: false,
     async init() {
@@ -301,7 +301,7 @@
           const d = await api('POST', '/auth/login', { username: this.username, password: this.password });
           localStorage.setItem('evolveshot_token', d.token);
           store.user = d.user;
-          location.hash = '#/generate';
+          location.hash = '#/h3image'; // v1.0.64 需求1：登录后默认进文生图H3
         } catch (e) { this.err = e.message; } finally { this.busy = false; }
       },
       async doRegister() {
@@ -340,9 +340,10 @@
           <div class="row" style="flex-wrap:nowrap">
             <div class="field" style="min-width:0">
               <label>首帧图像（必传）</label>
-              <input type="file" accept="image/*" @change="onFile" />
+              <input ref="gFirst" type="file" accept="image/*" style="display:none" @change="onFile" />
               <img v-if="preview" :src="preview" class="preview-img" style="margin-top:10px;max-height:240px" />
               <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+                <button class="btn sm" @click="$refs.gFirst.click()" title="选择本地图片作为首帧">上传首帧图</button>
                 <button v-if="image" class="btn sm" @click="clearStart">清除首帧</button>
                 <button class="btn sm" @click="openPick('first')" title="从文生图/分层图的历史生成图中选一张当首帧">从系统选图</button>
                 <button class="btn sm" @click="openPaste('first')" title="粘贴剪贴板图片（Ctrl+V）作为首帧">粘贴图片</button>
@@ -350,9 +351,10 @@
             </div>
             <div class="field" style="min-width:0">
               <label>尾帧图像（可选）</label>
-              <input type="file" accept="image/*" @change="onEndFile" />
+              <input ref="gEnd" type="file" accept="image/*" style="display:none" @change="onEndFile" />
               <img v-if="endPreview" :src="endPreview" class="preview-img" style="margin-top:10px;max-height:240px" />
               <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+                <button class="btn sm" @click="$refs.gEnd.click()" title="选择本地图片作为尾帧（与首帧一起 = 首尾帧模式）">上传尾帧图</button>
                 <button v-if="endImage" class="btn sm" @click="clearEnd">清除尾帧</button>
                 <button class="btn sm" @click="openPick('end')" title="从文生图/分层图的历史生成图中选一张当尾帧">从系统选图</button>
                 <button class="btn sm" @click="openPaste('end')" title="粘贴剪贴板图片（Ctrl+V）作为尾帧">粘贴图片</button>
@@ -391,8 +393,9 @@
             <div class="row" style="flex-wrap:nowrap">
               <div class="field" style="min-width:0">
                 <label>批量首帧（可多选，按选择顺序排队）</label>
-                <input type="file" accept="image/*" multiple @change="onBatchFirst" />
+                <input ref="gBatchFirst" type="file" accept="image/*" multiple style="display:none" @change="onBatchFirst" />
                 <div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap">
+                  <button class="btn sm" @click="$refs.gBatchFirst.click()" title="选择本地图片（可多选，按选择顺序排队）">上传图片</button>
                   <button class="btn sm" @click="openPaste('batchFirst')" title="粘贴剪贴板图片（Ctrl+V，可连续多张）">粘贴图片</button>
                   <button class="btn sm" @click="openPickMulti('batchFirst')" title="从文生图/分层图的历史生成图中多选，按点选顺序排队">从系统选图</button>
                 </div>
@@ -400,8 +403,9 @@
               </div>
               <div class="field" style="min-width:0">
                 <label>批量尾帧（可选；须与首帧数量一致、按顺序一一对应）</label>
-                <input type="file" accept="image/*" multiple @change="onBatchEnd" />
+                <input ref="gBatchEnd" type="file" accept="image/*" multiple style="display:none" @change="onBatchEnd" />
                 <div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap">
+                  <button class="btn sm" @click="$refs.gBatchEnd.click()" title="选择本地图片（可多选，与首帧一一对应）">上传图片</button>
                   <button class="btn sm" @click="openPaste('batchEnd')" title="粘贴剪贴板图片（Ctrl+V，可连续多张）">粘贴图片</button>
                   <button class="btn sm" @click="openPickMulti('batchEnd')" title="从文生图/分层图的历史生成图中多选，按点选顺序一一对应">从系统选图</button>
                 </div>
@@ -1977,7 +1981,7 @@
     </div>`,
     data() {
       return {
-        p: { prompt: '', negative: '', variant: 'int8', turbo: '8', aspect_ratio: 'custom', resolution_profile: 'native detail | 0.98 MP', quality_profile: 'single image | 1 frame (image VAE)', optimize_for_still: true, seed: -1, source_fidelity: 0.6, width: 1920, height: 1080, batch_size: 1, control_after_generate: 'randomize',
+        p: { prompt: '', negative: '', variant: 'int8', turbo: '8', aspect_ratio: 'custom', resolution_profile: 'native detail | 0.98 MP', quality_profile: 'single image | 1 frame (image VAE)', optimize_for_still: true, seed: -1, source_fidelity: 0, width: 1920, height: 1080, batch_size: 1, control_after_generate: 'randomize',
              unet_name: '', ref_unet_name: '', unet_gguf: '', clip_name: '', vae_name: '', similarity_weight: '', top_k: 4 }, // 需求25 模型与高级参数；aspect 默认 custom（宽高框常显可填）
         refs: [],            // [{ name, dataUrl, ext, data }]（data=base64，提交用；文件大不进 params）
         ratioLock: '', ratio: 0, _syncing: false, sizePreset: '', sizePresets: SIZE_PRESETS,
@@ -2654,20 +2658,22 @@
         <div v-if="mode==='i2v'" class="row" style="flex:none;align-items:flex-start;gap:24px;flex-wrap:wrap">
           <div class="field" style="max-width:420px">
             <label>首帧参考图 <span class="muted" style="font-weight:normal">（必传）</span></label>
-            <input type="file" accept="image/*" @change="onFile($event, 'first')" />
+            <input ref="h3vFirst" type="file" accept="image/*" style="display:none" @change="onFile($event, 'first')" />
             <img v-if="preview" :src="preview" class="preview-img" style="margin-top:10px;max-height:220px" />
             <div style="margin-top:8px">
-              <button class="btn sm" @click="openPick('first')" title="从文生图/分层图的历史生成图中选一张当首帧">从系统选图</button>
+              <button class="btn sm" @click="$refs.h3vFirst.click()" title="选择本地图片作为首帧参考图">上传首帧图</button>
+              <button class="btn sm" style="margin-left:8px" @click="openPick('first')" title="从文生图/分层图的历史生成图中选一张当首帧">从系统选图</button>
               <button class="btn sm" style="margin-left:8px" @click="openPaste('first')" title="粘贴剪贴板图片（Ctrl+V）作为首帧参考图">粘贴图片</button>
               <button v-if="image" class="btn sm" style="margin-left:8px" @click="clearStart">清除首帧</button>
             </div>
           </div>
           <div class="field" style="max-width:420px">
             <label>尾帧参考图 <span class="muted" style="font-weight:normal">（可选；与首帧一起 = 首尾帧模式）</span></label>
-            <input type="file" accept="image/*" @change="onFile($event, 'end')" />
+            <input ref="h3vEnd" type="file" accept="image/*" style="display:none" @change="onFile($event, 'end')" />
             <img v-if="preview2" :src="preview2" class="preview-img" style="margin-top:10px;max-height:220px" />
             <div style="margin-top:8px">
-              <button class="btn sm" @click="openPick('end')" title="从文生图/分层图的历史生成图中选一张当尾帧">从系统选图</button>
+              <button class="btn sm" @click="$refs.h3vEnd.click()" title="选择本地图片作为尾帧参考图（与首帧一起 = 首尾帧模式）">上传尾帧图</button>
+              <button class="btn sm" style="margin-left:8px" @click="openPick('end')" title="从文生图/分层图的历史生成图中选一张当尾帧">从系统选图</button>
               <button class="btn sm" style="margin-left:8px" @click="openPaste('end')" title="粘贴剪贴板图片（Ctrl+V）作为尾帧参考图">粘贴图片</button>
               <button v-if="image2" class="btn sm" style="margin-left:8px" @click="clearEnd">清除尾帧</button>
             </div>
@@ -2688,11 +2694,12 @@
             <div style="font-size:11px;opacity:.65;text-align:center;margin-top:2px">第 {{ i + 1 }}/{{ refs.length }} 张</div>
           </div>
           <div v-if="refs.length < 3" style="display:flex;flex-direction:column;gap:8px">
-            <input type="file" accept="image/*" multiple @change="onRefFile($event)" title="选择人物照片（可多选，追加进参考位）" />
-            <div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+              <button class="btn sm" @click="$refs.h3vRef.click()" title="选择人物照片（可多选，追加进参考位）">上传图片</button>
               <button class="btn sm" @click="openPick('ref')" title="从文生图/分层图的历史生成图中选一张当人物参考">从系统选图</button>
-              <button class="btn sm" style="margin-left:8px" @click="openPaste('ref')" title="粘贴剪贴板图片（Ctrl+V），可连续粘贴多张追加">粘贴图片</button>
+              <button class="btn sm" @click="openPaste('ref')" title="粘贴剪贴板图片（Ctrl+V），可连续粘贴多张追加">粘贴图片</button>
             </div>
+            <input ref="h3vRef" type="file" accept="image/*" multiple style="display:none" @change="onRefFile($event)" />
           </div>
         </div>
         <div v-if="refs.length" style="margin-top:8px"><button class="btn sm" @click="clearRefs">清空参考（{{ refs.length }} 张）</button></div>
@@ -2706,7 +2713,8 @@
         <h3>配音 <span class="muted" style="font-weight:normal;font-size:12px">（H3 原生配音对台词格式敏感——乱发音先试这里）</span></h3>
         <div class="row" style="flex-wrap:wrap;align-items:center;gap:12px">
           <label class="chk"><input type="checkbox" v-model="p.mute_audio" :disabled="!!voiceName" title="出无声视频，台词后期自己配音/合成（发音 100% 可控）；先移除参考音频才能勾" /> 仅画面（无声，后期配音）</label>
-          <input v-if="!p.mute_audio" type="file" accept="audio/*" @change="onVoiceFile($event)" style="max-width:320px" title="外部 TTS 生成的清唱台词音频（wav/mp3/m4a）→ H3 严格跟随它的台词/发音/语速/音色，只对口型" />
+          <button v-if="!p.mute_audio" class="btn sm" @click="$refs.h3vVoice.click()" title="外部 TTS 生成的清唱台词音频（wav/mp3/m4a）→ H3 严格跟随它的台词/发音/语速/音色，只对口型">上传参考音频</button>
+          <input v-if="!p.mute_audio" ref="h3vVoice" type="file" accept="audio/*" style="display:none" @change="onVoiceFile($event)" />
         </div>
         <div v-if="voiceName" style="margin-top:8px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           <audio :src="voiceDataUrl" controls style="height:34px"></audio>
@@ -3234,7 +3242,7 @@
   const MyHistory = {
     template: `
     <div>
-      <div class="page-head"><h2>我的历史</h2><div class="desc">你的全部生成记录（首尾视频 · 文生图 · 生视频H3），矩阵卡片展示</div></div>
+      <!-- v1.0.64：并入任务中心 tab，去掉页级标题 -->
       <div v-if="!jobs.length" class="muted">还没有生成记录</div>
       <div v-else class="hist-grid">
         <div v-for="j in jobs" :key="j.type + '-' + j.id" class="hist-card">
@@ -3282,7 +3290,7 @@
   const UserHistory = {
     template: `
     <div>
-      <div class="page-head"><h2>用户历史</h2><div class="desc">全部用户的生成历史与生成次数（首尾视频 · 文生图 · 生视频H3）——点选用户查看其生成记录</div></div>
+      <!-- v1.0.64：并入任务中心 tab（权限显隐），去掉页级标题 -->
       <div class="card"><h3>生成次数汇总（点一行 = 只看这个用户）</h3>
         <table><thead><tr><th></th><th>用户</th><th>昵称</th><th>角色</th><th>已用</th><th>额度</th><th>成功</th><th>失败</th></tr></thead>
         <tbody><tr v-for="s in summary" :key="s.id" style="cursor:pointer" :class="{sel: selUser === s.username}" @click="pickUser(s.username)">
@@ -3359,7 +3367,8 @@
   const Models = {
     template: `
     <div>
-      <div class="page-head"><h2>模型配置</h2><div class="desc">四个后端各自的模型与地址：文生图 Z-image · 视频生成 H3 · 首尾视频 WAN2.2 · 配音 MOSS</div></div>
+      <!-- v1.0.64：并入设置第一 tab，去掉页级标题（描述保留给 tab 内上下文） -->
+      <div class="muted" style="margin-bottom:12px">四个后端各自的模型与地址：文生图 Z-image · 视频生成 H3 · 首尾视频 WAN2.2 · 配音 MOSS</div>
       <div class="card">
         <h3>输出目录（生成文件保存位置，三后端共用）</h3>
         <div class="muted" style="margin-bottom:10px;word-break:break-all">当前：{{ outputDir || '（默认 data/output）' }}</div>
@@ -4753,6 +4762,8 @@
     <div>
       <div class="page-head"><h2>设置</h2></div>
       <div class="tabs">
+        <!-- v1.0.64 需求6：模型配置并入设置，第一个 tab（有权限才显示；进入设置默认先看到它） -->
+        <button v-if="canModels" class="tab" :class="{active: tab==='models'}" @click="tab='models'">模型配置</button>
         <button class="tab" :class="{active: tab==='theme'}" @click="tab='theme'">主题</button>
         <template v-if="isAdmin">
           <button class="tab" :class="{active: tab==='ai'}" @click="tab='ai'">AI 设置</button>
@@ -4765,6 +4776,8 @@
         </template>
         <button class="tab" :class="{active: tab==='credits'}" @click="tab='credits'">致谢</button>
       </div>
+
+      <Models v-if="tab==='models'" />
 
       <div v-if="tab==='theme'" class="card">
         <h3>主题</h3>
@@ -4994,16 +5007,19 @@
     </div>`,
     data() {
       return {
-        store, tab: 'theme', isAdmin: store.user && store.user.role === 'admin',
+        store,
+        // v1.0.64 需求6：有模型配置权限时默认停在该 tab（旧 #/models 链接也落这里）
+        tab: (store.user && (store.user.role === 'admin' || (store.user.allowed_pages || []).includes('models'))) ? 'models' : 'theme',
+        isAdmin: store.user && store.user.role === 'admin',
         oldP: '', newP: '',
         users: [],
         allPages: [
           { key: 'generate', label: '首尾视频' }, { key: 'zimage', label: '文生图' }, { key: 'ad', label: '分层图' },
           { key: 'h3', label: '生视频H3' }, { key: 'ha', label: '远程开机' },
-          { key: 'tasks', label: '任务中心' }, { key: 'history', label: '我的历史' },
+          { key: 'tasks', label: '任务中心' }, { key: 'history', label: '我的历史（任务中心 tab）' },
           { key: 'voice', label: '语音配音' }, { key: 'edit', label: '视频剪辑' },
-          { key: 'user-history', label: '用户历史' },
-          { key: 'models', label: '模型配置' }, { key: 'settings', label: '设置' },
+          { key: 'user-history', label: '用户历史（任务中心 tab）' },
+          { key: 'models', label: '模型配置（设置 tab）' }, { key: 'settings', label: '设置' },
         ],
         cert: { cn: '', days: 820, san: '', status: null },
         up: { version: '', pkgVer: '', list: [] },
@@ -5018,6 +5034,7 @@
     computed: {
       logsPages() { return Math.max(1, Math.ceil((this.logs || []).length / this.logsSize)); },
       pagedLogs() { const s = (this.logsPage - 1) * this.logsSize; return (this.logs || []).slice(s, s + this.logsSize); },
+      canModels() { const u = store.user; return !!u && (u.role === 'admin' || (u.allowed_pages || []).includes('models')); },
     },
     async mounted() {
       if (this.isAdmin) { this.loadUsers(); this.loadInvites(); this.loadLogs(); this.loadBans(); this.loadCert(); this.loadUp(); this.loadAi(); }
@@ -6225,7 +6242,16 @@
   const Tasks = {
     template: `
     <div>
-      <div class="page-head"><h2>任务中心</h2><div class="desc">三类生成队列的进行中 / 排队中任务一览——页面退出后台照样在跑，回来看状态、点停止</div></div>
+      <div class="page-head"><h2>任务中心</h2><div class="desc">生成队列与历史记录——页面退出后台照样在跑，回来看状态、点停止</div></div>
+      <!-- v1.0.64 需求5：我的历史/用户历史并入任务中心 tab；用户历史 tab 按权限显隐 -->
+      <div class="tabs">
+        <button class="tab" :class="{active: tab==='tasks'}" @click="tab='tasks'">任务中心</button>
+        <button class="tab" :class="{active: tab==='mine'}" @click="tab='mine'">我的历史</button>
+        <button v-if="canUserHistory" class="tab" :class="{active: tab==='users'}" @click="tab='users'">用户历史</button>
+      </div>
+      <MyHistory v-if="tab==='mine'" />
+      <UserHistory v-else-if="tab==='users'" />
+      <template v-else>
       <div class="card">
         <div class="row" style="flex:none;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
           <span class="badge" :class="tasks.length ? 'warn' : 'ok'">{{ tasks.length ? tasks.length + ' 个任务' : '当前没有进行中/排队中的任务' }}</span>
@@ -6269,8 +6295,12 @@
           · 服务重启会自动把进行中的任务标记为失败（不会再出现僵尸「生成中」）。
         </div>
       </div>
+      </template>
     </div>`,
-    data() { return { tasks: [], loading: false, stopping: '', stopMsg: '', stopErr: '', timer: null }; },
+    data() { return { tab: store.route === 'history' ? 'mine' : (store.route === 'user-history' ? 'users' : 'tasks'), tasks: [], loading: false, stopping: '', stopMsg: '', stopErr: '', timer: null }; },
+    computed: {
+      canUserHistory() { const u = store.user; return !!u && (u.role === 'admin' || (u.allowed_pages || []).includes('user-history')); },
+    },
     methods: {
       fmtDur(ms) {
         if (!ms || ms <= 0) return '-';
@@ -6317,17 +6347,14 @@
           <div class="sub">EvolveShot</div>
         </div>
         <nav class="nav">
-          <button v-if="can('zimage')" class="nav-item" :class="{active: store.route==='zimage'}" @click="store.nav('zimage')"><span class="material-icons">image</span>文生图Z</button>
           <button v-if="can('zimage')" class="nav-item" :class="{active: store.route==='h3image'}" @click="store.nav('h3image')"><span class="material-icons">auto_awesome</span>文生图H3</button>
           <button v-if="can('h3')" class="nav-item" :class="{active: store.route==='h3'}" @click="store.nav('h3')"><span class="material-icons">movie</span>生视频H3</button>
+          <button v-if="can('zimage')" class="nav-item" :class="{active: store.route==='zimage'}" @click="store.nav('zimage')"><span class="material-icons">image</span>文生图Z</button>
           <button v-if="can('zimage')" class="nav-item" :class="{active: store.route==='ad'}" @click="store.nav('ad')"><span class="material-icons">layers</span>分层图</button>
           <button v-if="can('generate')" class="nav-item" :class="{active: store.route==='generate'}" @click="store.nav('generate')"><span class="material-icons">switch_video</span>首尾视频</button>
           <button v-if="can('edit')" class="nav-item" :class="{active: store.route==='edit'}" @click="store.nav('edit')"><span class="material-icons">content_cut</span>视频剪辑</button>
           <button v-if="can('voice')" class="nav-item" :class="{active: store.route==='voice'}" @click="store.nav('voice')"><span class="material-icons">record_voice_over</span>语音配音</button>
           <button v-if="can('tasks')" class="nav-item" :class="{active: store.route==='tasks'}" @click="store.nav('tasks')"><span class="material-icons">fact_check</span>任务中心</button>
-          <button v-if="can('history')" class="nav-item" :class="{active: store.route==='history'}" @click="store.nav('history')"><span class="material-icons">history</span>我的历史</button>
-          <button v-if="can('user-history')" class="nav-item" :class="{active: store.route==='user-history'}" @click="store.nav('user-history')"><span class="material-icons">manage_search</span>用户历史</button>
-          <button v-if="can('models')" class="nav-item" :class="{active: store.route==='models'}" @click="store.nav('models')"><span class="material-icons">tune</span>模型配置</button>
           <button class="nav-item" :class="{active: store.route==='settings'}" @click="store.nav('settings')"><span class="material-icons">settings</span>设置</button>
           <button v-if="can('ha')" class="nav-item" :class="{active: store.route==='ha'}" @click="store.nav('ha')"><span class="material-icons">power_settings_new</span>远程开机</button>
         </nav>
@@ -6349,8 +6376,9 @@
     data() { return { store }; },
     computed: {
       view() {
-        const m = { generate: Generate, zimage: ZImage, h3image: H3Image, ad: ZImageAd, h3: H3, ha: HaPanel, tasks: Tasks, history: MyHistory, 'user-history': UserHistory, models: Models, voice: Voice, edit: Edit, settings: Settings };
-        return m[store.route] || Generate;
+        // v1.0.64：我的历史/用户历史并入任务中心 tab、模型配置并入设置 tab——旧 hash 重定向到新家；默认页=文生图H3
+        const m = { generate: Generate, zimage: ZImage, h3image: H3Image, ad: ZImageAd, h3: H3, ha: HaPanel, tasks: Tasks, history: Tasks, 'user-history': Tasks, models: Settings, voice: Voice, edit: Edit, settings: Settings };
+        return m[store.route] || H3Image;
       },
       comfyBadge() {
         const s = store.comfyStatus || {};

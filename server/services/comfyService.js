@@ -1457,7 +1457,7 @@ function h3iDefaults() {
     seed: -1,
     width: 1920, height: 1080,             // 需求24 默认 FHD（v1.0.45 起自定义尺寸，aspect_ratio='custom' 时生效，32 的倍数自动圆整）
     batch_size: 1, control_after_generate: 'randomize', // v1.0.45 批量与种子策略（randomize/fixed/increment/decrement）
-    source_fidelity: 0.6,                  // 参考图编辑：源图保真度
+    source_fidelity: 0,                    // 参考图编辑：源图保真度（v1.0.64 默认 0=低=敢改）
   };
 }
 
@@ -1515,7 +1515,7 @@ function buildH3ImageWorkflow(p) {
         edit_instruction: String(p.prompt || '').trim(),
         width: custom ? cw : ['4', 0], height: custom ? ch : ['4', 1],
         quality_profile: p.qualityProfile || 'single image | 1 frame (image VAE)',
-        source_fidelity: Math.max(0, Math.min(1, Number(p.sourceFidelity) || 0.6)),
+        source_fidelity: Number.isFinite(Number(p.sourceFidelity)) ? Math.max(0, Math.min(1, Number(p.sourceFidelity))) : 0.6, // v1.0.64：0 是合法显式值，别再用 || 兜底吃掉
         source_fit: 'crop_center', reference_detail: 'max_identity_2048', optimize_for_still: p.optimizeForStill !== false,
       },
     };
